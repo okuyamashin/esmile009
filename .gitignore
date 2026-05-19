@@ -14,6 +14,7 @@ Thumbs.db
 
 # 個人情報・社外秘になりうる入出力（テストはローカルのみ）
 samples/in/*.xlsx
+samples/in/*.pdf
 samples/in/*.xls
 samples/in/~$*
 samples/out/*.pdf
