@@ -48,7 +48,8 @@ curl -fsS -X POST http://127.0.0.1:18083/convert \
 |------|------|
 | `MAX_UPLOAD_BYTES` | アップロード上限（既定 15MB） |
 | `CONVERT_TIMEOUT_SEC` | LibreOffice のタイムアウト秒（既定 120） |
-| `BASE_PATH` | URL のサブパス（例: `/esmile009`）。未設定なら `/health` がルート直下 |
+| `BASE_PATH` | URL のサブパス（例: `/esmile009`）。Apache がプレフィックスを削るときは不要 |
+| `BIND_ADDRESS` | ホストにバインドするアドレス（既定 `127.0.0.1`）。**別マシンの Apache が `ProxyPass http://このEC2のIP:18083/` のときは `0.0.0.0`** にする |
 
 ホストのポートは `docker-compose.yml` の `ports` で変更してください。`convert.sh` の既定 `API_URL` も合わせて調整します。
 
@@ -76,6 +77,17 @@ location /esmile009/ {
 変換 API は **`POST https://example.com/esmile009/convert`** になります。
 
 ※ nginx で **`/esmile009` を削ってから**バックエンドの `/health` に転送している場合は、アプリ側の `BASE_PATH` は空のままで構いません。
+
+### 別サーバー（Apache）→ このマシンの公網 IP:18083（例: ProxyPass で `175.41.x.x:18083`）
+
+このリポジトリの Compose は既定で **`127.0.0.1:18083` のみ**にバインドするため、**他ホストからは繋がりません**。EC2 にプロジェクト直下で **`.env`** を置いてください。
+
+```bash
+BIND_ADDRESS=0.0.0.0
+```
+
+そのうえで `docker compose up -d` をやり直すと **`0.0.0.0:18083`** で待ち受けます。  
+AWS の **セキュリティグループ**は、`18083` の **ソースを Apache が動いているサーバーのパブリック IP / SG に限定**するのが安全です（世界中に開けるのは避けたいです）。
 
 ## ライセンス
 
