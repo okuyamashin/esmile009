@@ -1,0 +1,25 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 環境・鍵（公開リポジトリではコミットしない）
+.env
+.env.*
+*.pem
+*.key
+
+# 個人情報・社外秘になりうる入出力（テストはローカルのみ）
+samples/in/*.xlsx
+samples/in/*.xls
+samples/in/~$*
+samples/out/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
