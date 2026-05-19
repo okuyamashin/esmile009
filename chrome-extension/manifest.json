@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "esmile009 xlsx→PDF",
+  "version": "0.1.0",
+  "description": "esmile009 の変換APIをブラウザから呼び出すための拡張（準備中）",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://engawa2525.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "esmile009"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

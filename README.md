@@ -42,6 +42,10 @@ curl -fsS -X POST http://127.0.0.1:18083/convert \
 ./stop
 ```
 
+## Chrome 拡張（準備中）
+
+`chrome-extension/` に Manifest V3 の雛形があります。開発者向け手順は同ディレクトリの `chrome-extension/README.md` を見てください。
+
 ## 環境変数（Compose）
 
 | 名前 | 説明 |
