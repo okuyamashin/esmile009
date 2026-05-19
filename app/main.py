@@ -5,13 +5,31 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
 CONVERT_TIMEOUT_SEC = int(os.environ.get("CONVERT_TIMEOUT_SEC", "120"))
 
-app = FastAPI(title="xlsx2pdf", version="1.0.0")
+# リバースプロキシでサブパス公開する場合（例: https://example.com/esmile009/health）
+BASE_PATH_raw = os.environ.get("BASE_PATH", "").strip()
+BASE_PATH = BASE_PATH_raw.rstrip("/") if BASE_PATH_raw else ""
+if BASE_PATH and not BASE_PATH.startswith("/"):
+    BASE_PATH = "/" + BASE_PATH
+
+_docs = f"{BASE_PATH}/docs" if BASE_PATH else "/docs"
+_openapi = f"{BASE_PATH}/openapi.json" if BASE_PATH else "/openapi.json"
+_redoc = f"{BASE_PATH}/redoc" if BASE_PATH else "/redoc"
+
+app = FastAPI(
+    title="xlsx2pdf",
+    version="1.0.0",
+    docs_url=_docs,
+    openapi_url=_openapi,
+    redoc_url=_redoc,
+)
+
+router = APIRouter()
 
 
 def _content_disposition(filename: str) -> str:
@@ -21,12 +39,12 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_safe}\"; filename*=UTF-8''{encoded}"
 
 
-@app.get("/health")
+@router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/convert")
+@router.post("/convert")
 async def convert(file: UploadFile = File(...)) -> Response:
     name = (file.filename or "upload").strip()
     suffix = Path(name).suffix.lower()
@@ -84,3 +102,9 @@ async def convert(file: UploadFile = File(...)) -> Response:
         media_type="application/pdf",
         headers={"Content-Disposition": _content_disposition(out_name)},
     )
+
+
+if BASE_PATH:
+    app.include_router(router, prefix=BASE_PATH)
+else:
+    app.include_router(router)
