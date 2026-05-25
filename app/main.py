@@ -1,13 +1,13 @@
 import os
 import re
-import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from app.converter import libreoffice_convert
+from app.converter import _convert_bytes_to_pdf_bytes
+from app.version import APP_VERSION, health_payload
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ _redoc = f"{BASE_PATH}/redoc" if BASE_PATH else "/redoc"
 
 app = FastAPI(
     title="xlsx2pdf",
-    version="1.0.0",
+    version=APP_VERSION,
     docs_url=_docs,
     openapi_url=_openapi,
     redoc_url=_redoc,
@@ -50,7 +50,7 @@ def _content_disposition(filename: str) -> str:
 
 @router.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return health_payload()
 
 
 @router.get("/test-download")
@@ -96,18 +96,12 @@ async def convert(file: UploadFile = File(...)) -> Response:
 
     stem = Path(name).stem or "document"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / f"input{suffix}"
-        out_dir = Path(tmp) / "out"
-        src.write_bytes(data)
-        try:
-            pdf_path = libreoffice_convert(src, out_dir)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-        body = pdf_path.read_bytes()
+    try:
+        body = _convert_bytes_to_pdf_bytes(data, suffix)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     out_name = f"{stem}.pdf"
     return Response(

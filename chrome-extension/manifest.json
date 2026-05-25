@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "esmile009 xlsx→PDF",
-  "version": "0.1.0",
-  "description": "esmile009 の変換APIをブラウザから呼び出すための拡張（準備中）",
-  "permissions": ["storage"],
+  "version": "0.3.20260525",
+  "description": "Excel をダウンロードして PDF に変換し、保存する Chrome 拡張",
+  "permissions": ["storage", "downloads"],
   "host_permissions": [
     "https://engawa2525.com/*",
     "http://127.0.0.1/*",
@@ -19,5 +19,16 @@
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://engawa2525.com/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

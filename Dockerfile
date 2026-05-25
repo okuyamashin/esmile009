@@ -24,6 +24,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY VERSION ./
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=$GIT_COMMIT
+
 COPY app/ ./app/
 COPY tests/ ./tests/
 COPY test-download/ ./test-download/
