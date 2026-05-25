@@ -69,12 +69,10 @@ else
 
   echo "変換 (docker run): $INPUT_PATH -> $OUT_DIR/"
   docker run --rm \
-    --entrypoint /bin/bash \
     -v "$INPUT_DIR:/work/in:ro" \
     -v "$OUT_DIR:/work/out" \
     "$IMAGE_NAME" \
-    -c "exec libreoffice --headless --norestore --nologo --nofirststartwizard \
-      --convert-to pdf --outdir /work/out \"/work/in/$FILENAME\""
+    python -m app.cli_convert "/work/in/$FILENAME" /work/out
 fi
 
 echo "完了: $OUT_DIR/$PDF_NAME"

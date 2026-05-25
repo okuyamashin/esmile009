@@ -9,11 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-liberation \
     fonts-noto-cjk \
+    fonts-vlgothic \
     python3 \
     python3-venv \
  && rm -rf /var/lib/apt/lists/* \
- && fc-cache -fv \
  && python3 -m venv /venv
+
+COPY docker/fontconfig/local.conf /etc/fonts/local.conf
+RUN fc-cache -fv
 
 ENV PATH="/venv/bin:$PATH"
 
@@ -22,6 +25,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY tests/ ./tests/
 
 EXPOSE 8080
 

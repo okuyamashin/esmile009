@@ -1,6 +1,5 @@
 import os
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
@@ -8,8 +7,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from app.converter import libreoffice_convert
+
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
-CONVERT_TIMEOUT_SEC = int(os.environ.get("CONVERT_TIMEOUT_SEC", "120"))
 
 # リバースプロキシでサブパス公開する場合（例: https://example.com/esmile009/health）
 BASE_PATH_raw = os.environ.get("BASE_PATH", "").strip()
@@ -65,34 +65,13 @@ async def convert(file: UploadFile = File(...)) -> Response:
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / f"input{suffix}"
         out_dir = Path(tmp) / "out"
-        out_dir.mkdir()
         src.write_bytes(data)
-
-        cmd = [
-            "libreoffice",
-            "--headless",
-            "--norestore",
-            "--nologo",
-            "--nofirststartwizard",
-            "--convert-to",
-            "pdf",
-            "--outdir",
-            str(out_dir),
-            str(src),
-        ]
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=CONVERT_TIMEOUT_SEC,
-        )
-        if proc.returncode != 0:
-            msg = (proc.stderr or proc.stdout or "").strip() or "変換に失敗しました"
-            raise HTTPException(status_code=500, detail=msg[:2000])
-
-        pdf_path = out_dir / f"{src.stem}.pdf"
-        if not pdf_path.is_file():
-            raise HTTPException(status_code=500, detail="PDF が生成されませんでした")
+        try:
+            pdf_path = libreoffice_convert(src, out_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         body = pdf_path.read_bytes()
 
