@@ -11,4 +11,6 @@ services:
     environment:
       MAX_UPLOAD_BYTES: "15728640"
       CONVERT_TIMEOUT_SEC: "120"
+    volumes:
+      - ./samples/in:/app/samples/in:ro
     restart: unless-stopped

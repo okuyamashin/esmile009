@@ -5,11 +5,20 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from app.converter import libreoffice_convert
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+TEST_DOWNLOAD_DIR = ROOT_DIR / "test-download"
+TEST_DOWNLOAD_XLSX = Path(
+    os.environ.get(
+        "TEST_DOWNLOAD_XLSX",
+        str(ROOT_DIR / "samples/in/完了報告書_2544094.xlsx"),
+    )
+)
+TEST_DOWNLOAD_FILENAME = TEST_DOWNLOAD_XLSX.name
 
 # リバースプロキシでサブパス公開する場合（例: https://example.com/esmile009/health）
 BASE_PATH_raw = os.environ.get("BASE_PATH", "").strip()
@@ -42,6 +51,31 @@ def _content_disposition(filename: str) -> str:
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/test-download")
+def test_download_page() -> HTMLResponse:
+    index_html = TEST_DOWNLOAD_DIR / "index.html"
+    if not index_html.is_file():
+        raise HTTPException(status_code=404, detail="テスト用ページが見つかりません")
+    download_url = f"{BASE_PATH}/test-download/file" if BASE_PATH else "/test-download/file"
+    html = index_html.read_text(encoding="utf-8").replace("__DOWNLOAD_URL__", download_url)
+    return HTMLResponse(html)
+
+
+@router.get("/test-download/file")
+def test_download_file() -> FileResponse:
+    if not TEST_DOWNLOAD_XLSX.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="テスト用 Excel が見つかりません。samples/in/ に配置してください。",
+        )
+    return FileResponse(
+        TEST_DOWNLOAD_XLSX,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=TEST_DOWNLOAD_FILENAME,
+        headers={"Content-Disposition": _content_disposition(TEST_DOWNLOAD_FILENAME)},
+    )
 
 
 @router.post("/convert")
