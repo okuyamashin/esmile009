@@ -27,10 +27,14 @@ PAGE_SETUP_RE = re.compile(r"<pageSetup\b([^>]*)/>")
 SCALE_ATTR_RE = re.compile(r'\bscale="(\d+)"')
 PAGE_MARGINS_RE = re.compile(r"<pageMargins\b([^>]*)/>")
 MARGIN_LEFT_ATTR_RE = re.compile(r'\bleft="([^"]+)"')
+MARGIN_RIGHT_ATTR_RE = re.compile(r'\bright="([^"]+)"')
 
 # LibreOffice は xlsx の左余白をそのまま使うが、Excel 本体の PDF 出力より左寄りになる。
 # 完了報告書サンプルでは left=0.7 → 1.0 で Excel 出力に近づく。
 DEFAULT_PAGE_MARGIN_LEFT = "1.0"
+DEFAULT_PAGE_MARGIN_RIGHT = "0"
+# 完了報告書サンプルでは 88% で 1 ページに収まる（xlsx 原本は 85%）。
+DEFAULT_PAGE_SETUP_SCALE = 88
 SZ_VAL_RE = re.compile(r'(<sz val=")(\d+(?:\.\d+)?)(")')
 
 # ロゴ直下の会社情報（3 行）。セル単位でフォントだけ縮小する。
@@ -70,6 +74,16 @@ def read_page_setup_scale(xlsx_bytes: bytes) -> int | None:
     if not scale_match:
         return None
     return int(scale_match.group(1))
+
+
+def _page_setup_scale() -> int | None:
+    raw = os.environ.get("PAGE_SETUP_SCALE", str(DEFAULT_PAGE_SETUP_SCALE)).strip()
+    if raw.lower() in ("", "off", "none"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_PAGE_SETUP_SCALE
 
 
 def patch_page_setup_scale(xlsx_bytes: bytes, scale: int) -> bytes:
@@ -136,6 +150,53 @@ def patch_page_margins_left(xlsx_bytes: bytes, left: str) -> bytes:
                         attrs = MARGIN_LEFT_ATTR_RE.sub(f'left="{left}"', attrs)
                     else:
                         attrs = f' left="{left}"{attrs}'
+                    return f"<pageMargins{attrs}/>"
+
+                sheet = PAGE_MARGINS_RE.sub(repl, sheet, count=1)
+                content = sheet.encode("utf-8")
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+def _page_margin_right() -> str | None:
+    raw = os.environ.get("PAGE_MARGIN_RIGHT", DEFAULT_PAGE_MARGIN_RIGHT).strip()
+    if raw.lower() in ("", "off", "none"):
+        return None
+    return raw
+
+
+def read_page_margins_right(xlsx_bytes: bytes) -> str | None:
+    """xlsx 内 sheet1 の pageMargins right を返す。無ければ None。"""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zf:
+        if "xl/worksheets/sheet1.xml" not in zf.namelist():
+            return None
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    match = PAGE_MARGINS_RE.search(sheet)
+    if not match:
+        return None
+    right_match = MARGIN_RIGHT_ATTR_RE.search(match.group(1))
+    if not right_match:
+        return None
+    return right_match.group(1)
+
+
+def patch_page_margins_right(xlsx_bytes: bytes, right: str) -> bytes:
+    """sheet1 の pageMargins right を設定して xlsx バイト列を返す。"""
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            content = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                sheet = content.decode("utf-8")
+
+                def repl(match: re.Match[str]) -> str:
+                    attrs = match.group(1)
+                    if MARGIN_RIGHT_ATTR_RE.search(attrs):
+                        attrs = MARGIN_RIGHT_ATTR_RE.sub(f'right="{right}"', attrs)
+                    else:
+                        attrs = f' right="{right}"{attrs}'
                     return f"<pageMargins{attrs}/>"
 
                 sheet = PAGE_MARGINS_RE.sub(repl, sheet, count=1)
@@ -284,8 +345,12 @@ def _prepare_xlsx_bytes(
     margin_left = _page_margin_left()
     if margin_left is not None:
         xlsx_bytes = patch_page_margins_left(xlsx_bytes, margin_left)
-    if scale is not None:
-        xlsx_bytes = patch_page_setup_scale(xlsx_bytes, scale)
+    margin_right = _page_margin_right()
+    if margin_right is not None:
+        xlsx_bytes = patch_page_margins_right(xlsx_bytes, margin_right)
+    target_scale = scale if scale is not None else _page_setup_scale()
+    if target_scale is not None:
+        xlsx_bytes = patch_page_setup_scale(xlsx_bytes, target_scale)
     return xlsx_bytes
 
 
@@ -408,7 +473,9 @@ def find_best_scale(xlsx_bytes: bytes, suffix: str, tmp_out: Path) -> int | None
 
 
 def _should_adjust_scale(suffix: str) -> bool:
-    """左余白パッチ時は 1 ページに収めるため倍率探索も行う。"""
+    """固定倍率が無いときだけ、必要に応じて倍率探索を行う。"""
+    if _page_setup_scale() is not None:
+        return False
     return PDF_SCALE_ADJUST or (
         suffix == ".xlsx" and _page_margin_left() is not None
     )

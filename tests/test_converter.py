@@ -13,10 +13,12 @@ from app.converter import (
     page2_text,
     patch_logo_footer_font_sizes,
     patch_page_margins_left,
+    patch_page_margins_right,
     pdf_has_overflow_on_page2,
     pdf_is_acceptable,
     pdf_page_count,
     read_page_margins_left,
+    read_page_margins_right,
     read_page_setup_scale,
 )
 
@@ -40,6 +42,12 @@ class PageSetupTests(unittest.TestCase):
     def test_sample_has_scale_85(self) -> None:
         scale = read_page_setup_scale(SAMPLE_XLSX.read_bytes())
         self.assertEqual(scale, 85)
+
+    def test_prepare_uses_default_scale_88(self) -> None:
+        from app.converter import _prepare_xlsx_bytes
+
+        prepared = _prepare_xlsx_bytes(SAMPLE_XLSX.read_bytes(), ".xlsx", None)
+        self.assertEqual(read_page_setup_scale(prepared), 88)
 
 
 def _cell_font_size(data: bytes, ref: str) -> float | None:
@@ -76,11 +84,21 @@ class PageMarginsTests(unittest.TestCase):
         left = read_page_margins_left(SAMPLE_XLSX.read_bytes())
         self.assertEqual(left, "0.7")
 
+    def test_sample_has_right_margin_07(self) -> None:
+        right = read_page_margins_right(SAMPLE_XLSX.read_bytes())
+        self.assertEqual(right, "0.7")
+
     def test_patches_left_margin(self) -> None:
         original = SAMPLE_XLSX.read_bytes()
         patched = patch_page_margins_left(original, "1.0")
         self.assertEqual(read_page_margins_left(patched), "1.0")
         self.assertEqual(read_page_margins_left(original), "0.7")
+
+    def test_patches_right_margin(self) -> None:
+        original = SAMPLE_XLSX.read_bytes()
+        patched = patch_page_margins_right(original, "0")
+        self.assertEqual(read_page_margins_right(patched), "0")
+        self.assertEqual(read_page_margins_right(original), "0.7")
 
 
 class LogoFooterFontPatchTests(unittest.TestCase):
