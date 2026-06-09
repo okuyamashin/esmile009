@@ -25,6 +25,12 @@ CALC_PDF_EXPORT = "pdf"
 
 PAGE_SETUP_RE = re.compile(r"<pageSetup\b([^>]*)/>")
 SCALE_ATTR_RE = re.compile(r'\bscale="(\d+)"')
+PAGE_MARGINS_RE = re.compile(r"<pageMargins\b([^>]*)/>")
+MARGIN_LEFT_ATTR_RE = re.compile(r'\bleft="([^"]+)"')
+
+# LibreOffice は xlsx の左余白をそのまま使うが、Excel 本体の PDF 出力より左寄りになる。
+# 完了報告書サンプルでは left=0.7 → 1.0 で Excel 出力に近づく。
+DEFAULT_PAGE_MARGIN_LEFT = "1.0"
 SZ_VAL_RE = re.compile(r'(<sz val=")(\d+(?:\.\d+)?)(")')
 
 # ロゴ直下の会社情報（3 行）。セル単位でフォントだけ縮小する。
@@ -86,6 +92,53 @@ def patch_page_setup_scale(xlsx_bytes: bytes, scale: int) -> bytes:
                     return f"<pageSetup{attrs}/>"
 
                 sheet = PAGE_SETUP_RE.sub(repl, sheet, count=1)
+                content = sheet.encode("utf-8")
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+def _page_margin_left() -> str | None:
+    raw = os.environ.get("PAGE_MARGIN_LEFT", DEFAULT_PAGE_MARGIN_LEFT).strip()
+    if raw.lower() in ("", "off", "none"):
+        return None
+    return raw
+
+
+def read_page_margins_left(xlsx_bytes: bytes) -> str | None:
+    """xlsx 内 sheet1 の pageMargins left を返す。無ければ None。"""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zf:
+        if "xl/worksheets/sheet1.xml" not in zf.namelist():
+            return None
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    match = PAGE_MARGINS_RE.search(sheet)
+    if not match:
+        return None
+    left_match = MARGIN_LEFT_ATTR_RE.search(match.group(1))
+    if not left_match:
+        return None
+    return left_match.group(1)
+
+
+def patch_page_margins_left(xlsx_bytes: bytes, left: str) -> bytes:
+    """sheet1 の pageMargins left を設定して xlsx バイト列を返す。"""
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            content = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                sheet = content.decode("utf-8")
+
+                def repl(match: re.Match[str]) -> str:
+                    attrs = match.group(1)
+                    if MARGIN_LEFT_ATTR_RE.search(attrs):
+                        attrs = MARGIN_LEFT_ATTR_RE.sub(f'left="{left}"', attrs)
+                    else:
+                        attrs = f' left="{left}"{attrs}'
+                    return f"<pageMargins{attrs}/>"
+
+                sheet = PAGE_MARGINS_RE.sub(repl, sheet, count=1)
                 content = sheet.encode("utf-8")
             zout.writestr(item, content)
     return out_buf.getvalue()
@@ -228,6 +281,9 @@ def _prepare_xlsx_bytes(
     shrink_pt = _logo_footer_shrink_pt()
     if shrink_pt > 0:
         xlsx_bytes = patch_logo_footer_font_sizes(xlsx_bytes, shrink_pt=shrink_pt)
+    margin_left = _page_margin_left()
+    if margin_left is not None:
+        xlsx_bytes = patch_page_margins_left(xlsx_bytes, margin_left)
     if scale is not None:
         xlsx_bytes = patch_page_setup_scale(xlsx_bytes, scale)
     return xlsx_bytes
@@ -294,6 +350,19 @@ def drop_blank_page2(data: bytes) -> bytes:
     return out.getvalue()
 
 
+def keep_first_page_only(data: bytes) -> bytes:
+    """LibreOffice が付ける 2 ページ目を除き、1 ページ目だけを返す。"""
+    reader = PdfReader(io.BytesIO(data))
+    if len(reader.pages) <= 1:
+        return data
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0])
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def pdf_is_acceptable(data: bytes) -> bool:
     """1 ページ、または 2 ページ目が実質空なら許容。"""
     pages = pdf_page_count(data)
@@ -338,12 +407,19 @@ def find_best_scale(xlsx_bytes: bytes, suffix: str, tmp_out: Path) -> int | None
     return best
 
 
+def _should_adjust_scale(suffix: str) -> bool:
+    """左余白パッチ時は 1 ページに収めるため倍率探索も行う。"""
+    return PDF_SCALE_ADJUST or (
+        suffix == ".xlsx" and _page_margin_left() is not None
+    )
+
+
 def _convert_bytes_to_pdf_bytes(xlsx_bytes: bytes, suffix: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_out = Path(tmp) / "out"
         tmp_out.mkdir()
 
-        if PDF_SCALE_ADJUST and suffix == ".xlsx":
+        if _should_adjust_scale(suffix) and suffix == ".xlsx":
             scale = find_best_scale(xlsx_bytes, suffix, tmp_out)
             if scale is None:
                 pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, None, tmp_out)
@@ -352,7 +428,7 @@ def _convert_bytes_to_pdf_bytes(xlsx_bytes: bytes, suffix: str) -> bytes:
         else:
             pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, None, tmp_out)
 
-        return drop_blank_page2(pdf_bytes)
+        return keep_first_page_only(pdf_bytes)
 
 
 def convert_xlsx_to_pdf(src: Path, out_dir: Path) -> Path:

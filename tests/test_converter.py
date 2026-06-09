@@ -12,9 +12,11 @@ from app.converter import (
     find_best_scale,
     page2_text,
     patch_logo_footer_font_sizes,
+    patch_page_margins_left,
     pdf_has_overflow_on_page2,
     pdf_is_acceptable,
     pdf_page_count,
+    read_page_margins_left,
     read_page_setup_scale,
 )
 
@@ -62,6 +64,23 @@ def _cell_font_size(data: bytes, ref: str) -> float | None:
     font = fonts[font_id]
     size = re.search(r'<sz val="(\d+(?:\.\d+)?)"', font)
     return float(size.group(1)) if size else None
+
+
+class PageMarginsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SAMPLE_XLSX.is_file():
+            raise unittest.SkipTest(f"sample not found: {SAMPLE_XLSX}")
+
+    def test_sample_has_left_margin_07(self) -> None:
+        left = read_page_margins_left(SAMPLE_XLSX.read_bytes())
+        self.assertEqual(left, "0.7")
+
+    def test_patches_left_margin(self) -> None:
+        original = SAMPLE_XLSX.read_bytes()
+        patched = patch_page_margins_left(original, "1.0")
+        self.assertEqual(read_page_margins_left(patched), "1.0")
+        self.assertEqual(read_page_margins_left(original), "0.7")
 
 
 class LogoFooterFontPatchTests(unittest.TestCase):
