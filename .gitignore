@@ -24,6 +24,8 @@ logs/*.log
 
 # 変換 PDF 保存（ローカル / サーバー）
 data/convert/*.pdf
+data/convert/*.xlsx
+data/convert/*.xls
 
 # Python
 __pycache__/

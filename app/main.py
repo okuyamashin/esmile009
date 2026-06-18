@@ -8,8 +8,14 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from app.access_log import AccessLogMiddleware, append_access_extra, set_upload_extra
 from app.converter import _convert_bytes_to_pdf_bytes
-from app.convert_store import save_pdf, saved_pdf_path, validate_saved_filename
-from app.pdf_filename import timestamp_pdf_filename
+from app.convert_store import (
+    media_type_for_filename,
+    save_file,
+    saved_file_path,
+    saved_filename_for_key,
+    validate_saved_filename,
+)
+from app.pdf_filename import timestamp_save_key
 from app.version import APP_VERSION, health_payload
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
@@ -107,17 +113,32 @@ async def convert(request: Request, file: UploadFile = File(...)) -> Response:
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    out_name = timestamp_pdf_filename()
+    save_key = timestamp_save_key()
+    pdf_name = saved_filename_for_key(save_key, ".pdf")
+    excel_name = saved_filename_for_key(save_key, suffix)
     download_name = f"{Path(name).stem or 'document'}.pdf"
-    saved = save_pdf(body, out_name)
-    saved_path = f"{BASE_PATH}/output/{out_name}" if BASE_PATH else f"/output/{out_name}"
-    if saved is not None:
-        append_access_extra(request, f'saved="{out_name}" saved_path="{saved_path}"')
+
+    saved_pdf = save_file(body, pdf_name)
+    saved_excel = save_file(data, excel_name)
+    saved_pdf_path = f"{BASE_PATH}/output/{pdf_name}" if BASE_PATH else f"/output/{pdf_name}"
+    saved_excel_path = (
+        f"{BASE_PATH}/output/{excel_name}" if BASE_PATH else f"/output/{excel_name}"
+    )
+    if saved_pdf is not None or saved_excel is not None:
+        extra = []
+        if saved_pdf is not None:
+            extra.append(f'saved_pdf="{pdf_name}" saved_pdf_path="{saved_pdf_path}"')
+        if saved_excel is not None:
+            extra.append(f'saved_input="{excel_name}" saved_input_path="{saved_excel_path}"')
+        append_access_extra(request, " ".join(extra))
 
     headers = {"Content-Disposition": _content_disposition(download_name)}
-    if saved is not None:
-        headers["X-Saved-Filename"] = out_name
-        headers["X-Saved-Path"] = saved_path
+    if saved_pdf is not None:
+        headers["X-Saved-Filename"] = pdf_name
+        headers["X-Saved-Path"] = saved_pdf_path
+    if saved_excel is not None:
+        headers["X-Saved-Upload-Filename"] = excel_name
+        headers["X-Saved-Upload-Path"] = saved_excel_path
 
     return Response(
         content=body,
@@ -133,13 +154,13 @@ def get_saved_output(filename: str) -> FileResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    path = saved_pdf_path(filename)
+    path = saved_file_path(filename)
     if path is None:
-        raise HTTPException(status_code=404, detail="PDF が見つかりません")
+        raise HTTPException(status_code=404, detail="ファイルが見つかりません")
 
     return FileResponse(
         path,
-        media_type="application/pdf",
+        media_type=media_type_for_filename(filename),
         filename=filename,
         headers={"Content-Disposition": _content_disposition(filename)},
     )
