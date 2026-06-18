@@ -3,10 +3,12 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
+from app.access_log import AccessLogMiddleware, set_upload_extra
 from app.converter import _convert_bytes_to_pdf_bytes
+from app.pdf_filename import timestamp_pdf_filename
 from app.version import APP_VERSION, health_payload
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
@@ -37,6 +39,7 @@ app = FastAPI(
     openapi_url=_openapi,
     redoc_url=_redoc,
 )
+app.add_middleware(AccessLogMiddleware)
 
 router = APIRouter()
 
@@ -79,7 +82,7 @@ def test_download_file() -> FileResponse:
 
 
 @router.post("/convert")
-async def convert(file: UploadFile = File(...)) -> Response:
+async def convert(request: Request, file: UploadFile = File(...)) -> Response:
     name = (file.filename or "upload").strip()
     suffix = Path(name).suffix.lower()
     if suffix not in (".xlsx", ".xls"):
@@ -94,7 +97,7 @@ async def convert(file: UploadFile = File(...)) -> Response:
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="ファイルが大きすぎます")
 
-    stem = Path(name).stem or "document"
+    set_upload_extra(request, name, len(data))
 
     try:
         body = _convert_bytes_to_pdf_bytes(data, suffix)
@@ -103,7 +106,7 @@ async def convert(file: UploadFile = File(...)) -> Response:
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    out_name = f"{stem}.pdf"
+    out_name = timestamp_pdf_filename()
     return Response(
         content=body,
         media_type="application/pdf",

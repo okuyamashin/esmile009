@@ -48,7 +48,31 @@ function waitForDownloadComplete(downloadId) {
   });
 }
 
-async function convertAndDownload(excelUrl, excelFilename, pdfFilename) {
+function filenameFromContentDisposition(header) {
+  if (!header) return null;
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (star) return decodeURIComponent(star[1]);
+  const quoted = /filename="([^"]+)"/i.exec(header);
+  if (quoted) return quoted[1];
+  const plain = /filename=([^;]+)/i.exec(header);
+  if (plain) return plain[1].trim();
+  return null;
+}
+
+function timestampPdfFilename() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return (
+    `${now.getFullYear()}` +
+    `${pad(now.getMonth() + 1)}` +
+    `${pad(now.getDate())}` +
+    `${pad(now.getHours())}` +
+    `${pad(now.getMinutes())}` +
+    `${pad(now.getSeconds())}.pdf`
+  );
+}
+
+async function convertAndDownload(excelUrl, excelFilename) {
   const excelRes = await fetch(excelUrl, { method: "GET", cache: "no-store" });
   if (!excelRes.ok) {
     throw new Error(`Excel の取得に失敗しました (${excelRes.status})`);
@@ -79,15 +103,19 @@ async function convertAndDownload(excelUrl, excelFilename, pdfFilename) {
     throw new Error("PDF の生成結果が空です");
   }
 
+  const savedName =
+    filenameFromContentDisposition(convertRes.headers.get("Content-Disposition")) ||
+    timestampPdfFilename();
+
   const pdfBase64 = arrayBufferToBase64(pdfBuffer);
   const downloadId = await chrome.downloads.download({
     url: `data:application/pdf;base64,${pdfBase64}`,
-    filename: pdfFilename,
+    filename: savedName,
     saveAs: false,
   });
 
   await waitForDownloadComplete(downloadId);
-  return { filename: pdfFilename, apiBase };
+  return { filename: savedName, apiBase };
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -100,7 +128,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.action !== "convertToPdf") return;
 
-  convertAndDownload(message.excelUrl, message.excelFilename, message.pdfFilename)
+  convertAndDownload(message.excelUrl, message.excelFilename)
     .then((result) => sendResponse({ ok: true, ...result }))
     .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
 
