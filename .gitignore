@@ -19,6 +19,9 @@ samples/in/*.xls
 samples/in/~$*
 samples/out/*.pdf
 
+# アクセスログ（ローカル / サーバー）
+logs/*.log
+
 # Python
 __pycache__/
 *.py[cod]

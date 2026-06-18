@@ -11,6 +11,8 @@ services:
     environment:
       MAX_UPLOAD_BYTES: "15728640"
       CONVERT_TIMEOUT_SEC: "120"
+      ACCESS_LOG_FILE: "/var/log/esmile009/access.log"
     volumes:
       - ./samples/in:/app/samples/in:ro
+      - ./logs:/var/log/esmile009
     restart: unless-stopped
