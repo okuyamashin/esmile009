@@ -22,6 +22,9 @@ samples/out/*.pdf
 # アクセスログ（ローカル / サーバー）
 logs/*.log
 
+# 変換 PDF 保存（ローカル / サーバー）
+data/convert/*.pdf
+
 # Python
 __pycache__/
 *.py[cod]

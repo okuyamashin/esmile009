@@ -11,6 +11,11 @@ function findDownloadLink() {
   );
 }
 
+function pdfFilenameFromExcel(name) {
+  const base = String(name || "document.xlsx").replace(/\.(xlsx|xls)$/i, "");
+  return `${base || "document"}.pdf`;
+}
+
 function injectStyles() {
   if (document.getElementById("esmile009-pdf-styles")) return;
 
@@ -85,6 +90,7 @@ function injectPdfButton() {
     const excelName =
       link.getAttribute("download") ||
       decodeURIComponent(new URL(excelUrl).pathname.split("/").pop() || "document.xlsx");
+    const pdfName = pdfFilenameFromExcel(excelName);
 
     btn.disabled = true;
     setStatus("Excel を取得して PDF に変換しています…");
@@ -94,13 +100,14 @@ function injectPdfButton() {
         action: "convertToPdf",
         excelUrl,
         excelFilename: excelName,
+        pdfFilename: pdfName,
       });
 
       if (!response?.ok) {
         throw new Error(response?.error || "変換に失敗しました");
       }
 
-      setStatus(`保存しました: ${response.filename || "PDF"}\nAPI: ${response.apiBase || "(不明)"}`);
+      setStatus(`保存しました: ${response.filename || pdfName}\nAPI: ${response.apiBase || "(不明)"}`);
     } catch (err) {
       setStatus(String(err?.message || err), true);
     } finally {

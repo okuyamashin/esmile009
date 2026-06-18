@@ -48,6 +48,11 @@ function waitForDownloadComplete(downloadId) {
   });
 }
 
+function pdfFilenameFromExcel(name) {
+  const base = String(name || "document.xlsx").replace(/\.(xlsx|xls)$/i, "");
+  return `${base || "document"}.pdf`;
+}
+
 function filenameFromContentDisposition(header) {
   if (!header) return null;
   const star = /filename\*=UTF-8''([^;]+)/i.exec(header);
@@ -59,20 +64,7 @@ function filenameFromContentDisposition(header) {
   return null;
 }
 
-function timestampPdfFilename() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, "0");
-  return (
-    `${now.getFullYear()}` +
-    `${pad(now.getMonth() + 1)}` +
-    `${pad(now.getDate())}` +
-    `${pad(now.getHours())}` +
-    `${pad(now.getMinutes())}` +
-    `${pad(now.getSeconds())}.pdf`
-  );
-}
-
-async function convertAndDownload(excelUrl, excelFilename) {
+async function convertAndDownload(excelUrl, excelFilename, pdfFilename) {
   const excelRes = await fetch(excelUrl, { method: "GET", cache: "no-store" });
   if (!excelRes.ok) {
     throw new Error(`Excel の取得に失敗しました (${excelRes.status})`);
@@ -105,7 +97,8 @@ async function convertAndDownload(excelUrl, excelFilename) {
 
   const savedName =
     filenameFromContentDisposition(convertRes.headers.get("Content-Disposition")) ||
-    timestampPdfFilename();
+    pdfFilename ||
+    pdfFilenameFromExcel(excelFilename);
 
   const pdfBase64 = arrayBufferToBase64(pdfBuffer);
   const downloadId = await chrome.downloads.download({
@@ -128,7 +121,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.action !== "convertToPdf") return;
 
-  convertAndDownload(message.excelUrl, message.excelFilename)
+  convertAndDownload(message.excelUrl, message.excelFilename, message.pdfFilename)
     .then((result) => sendResponse({ ok: true, ...result }))
     .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
 

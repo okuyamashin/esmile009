@@ -6,8 +6,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from app.access_log import AccessLogMiddleware, set_upload_extra
+from app.access_log import AccessLogMiddleware, append_access_extra, set_upload_extra
 from app.converter import _convert_bytes_to_pdf_bytes
+from app.convert_store import save_pdf, saved_pdf_path, validate_saved_filename
 from app.pdf_filename import timestamp_pdf_filename
 from app.version import APP_VERSION, health_payload
 
@@ -107,10 +108,40 @@ async def convert(request: Request, file: UploadFile = File(...)) -> Response:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     out_name = timestamp_pdf_filename()
+    download_name = f"{Path(name).stem or 'document'}.pdf"
+    saved = save_pdf(body, out_name)
+    saved_path = f"{BASE_PATH}/output/{out_name}" if BASE_PATH else f"/output/{out_name}"
+    if saved is not None:
+        append_access_extra(request, f'saved="{out_name}" saved_path="{saved_path}"')
+
+    headers = {"Content-Disposition": _content_disposition(download_name)}
+    if saved is not None:
+        headers["X-Saved-Filename"] = out_name
+        headers["X-Saved-Path"] = saved_path
+
     return Response(
         content=body,
         media_type="application/pdf",
-        headers={"Content-Disposition": _content_disposition(out_name)},
+        headers=headers,
+    )
+
+
+@router.get("/output/{filename}")
+def get_saved_output(filename: str) -> FileResponse:
+    try:
+        validate_saved_filename(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    path = saved_pdf_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="PDF が見つかりません")
+
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=filename,
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 

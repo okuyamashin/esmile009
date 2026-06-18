@@ -59,6 +59,11 @@ def set_upload_extra(request: Request, filename: str, size: int) -> None:
     request.state.access_log_extra = f'upload="{_quote(filename)}" upload_bytes={size}'
 
 
+def append_access_extra(request: Request, fragment: str) -> None:
+    current = getattr(request.state, "access_log_extra", "")
+    request.state.access_log_extra = f"{current} {fragment}".strip() if current else fragment
+
+
 
 def format_access_line(
     *,
