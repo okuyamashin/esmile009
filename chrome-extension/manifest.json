@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "esmile009 xlsx→PDF",
-  "version": "0.3.20260525",
+  "version": "0.1.20260618",
   "description": "Excel をダウンロードして PDF に変換し、保存する Chrome 拡張",
   "permissions": ["storage", "downloads"],
   "host_permissions": [
