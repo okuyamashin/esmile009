@@ -24,6 +24,7 @@ from app.converter import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_XLSX = ROOT / "samples" / "in" / "完了報告書_2544094.xlsx"
+SAMPLE_XLSX_ALT = ROOT / "samples" / "in" / "完了報告書_2544674.xlsx"
 EXCEL_REF_PDF = ROOT / "samples" / "out" / "完了報告書_2544094_excel.pdf"
 
 
@@ -99,6 +100,27 @@ class PageMarginsTests(unittest.TestCase):
         patched = patch_page_margins_right(original, "0")
         self.assertEqual(read_page_margins_right(patched), "0")
         self.assertEqual(read_page_margins_right(original), "0.7")
+
+
+class AlternateSamplePrintSettingsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SAMPLE_XLSX_ALT.is_file():
+            raise unittest.SkipTest(f"sample not found: {SAMPLE_XLSX_ALT}")
+
+    def test_alt_sample_has_print_settings(self) -> None:
+        original = SAMPLE_XLSX_ALT.read_bytes()
+        self.assertEqual(read_page_margins_left(original), "0.7")
+        self.assertEqual(read_page_margins_right(original), "0.7")
+        self.assertEqual(read_page_setup_scale(original), 85)
+
+    def test_prepare_applies_patches_to_alt_sample(self) -> None:
+        from app.converter import _prepare_xlsx_bytes
+
+        prepared = _prepare_xlsx_bytes(SAMPLE_XLSX_ALT.read_bytes(), ".xlsx", None)
+        self.assertEqual(read_page_margins_left(prepared), "1.0")
+        self.assertEqual(read_page_margins_right(prepared), "0")
+        self.assertEqual(read_page_setup_scale(prepared), 88)
 
 
 class LogoFooterFontPatchTests(unittest.TestCase):

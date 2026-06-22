@@ -23,11 +23,26 @@ PDF_SCALE_ADJUST = os.environ.get("PDF_SCALE_ADJUST", "0").lower() not in (
 # Excel の印刷設定（余白・倍率など）を尊重する既定の PDF 出力
 CALC_PDF_EXPORT = "pdf"
 
-PAGE_SETUP_RE = re.compile(r"<pageSetup\b([^>]*)/>")
+PAGE_SETUP_RE = re.compile(
+    r"<pageSetup\b([^>]*?)(?:/>|>\s*</pageSetup>)",
+    re.S,
+)
 SCALE_ATTR_RE = re.compile(r'\bscale="(\d+)"')
-PAGE_MARGINS_RE = re.compile(r"<pageMargins\b([^>]*)/>")
+PAGE_MARGINS_RE = re.compile(
+    r"<pageMargins\b([^>]*?)(?:/>|>\s*</pageMargins>)",
+    re.S,
+)
 MARGIN_LEFT_ATTR_RE = re.compile(r'\bleft="([^"]+)"')
 MARGIN_RIGHT_ATTR_RE = re.compile(r'\bright="([^"]+)"')
+
+DEFAULT_PAGE_MARGINS_XML = (
+    '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" '
+    'header="0.3" footer="0.3"/>'
+)
+DEFAULT_PAGE_SETUP_XML = (
+    '<pageSetup paperSize="9" scale="85" fitToHeight="0" '
+    'orientation="portrait" r:id="rId1"/>'
+)
 
 # LibreOffice は xlsx の左余白をそのまま使うが、Excel 本体の PDF 出力より左寄りになる。
 # 完了報告書サンプルでは left=0.7 → 1.0 で Excel 出力に近づく。
@@ -44,6 +59,63 @@ FONT_ENTRY_RE = re.compile(r"<font>.*?</font>", re.S)
 CELLXFS_BLOCK_RE = re.compile(r"<cellXfs count=\"(\d+)\">(.*?)</cellXfs>", re.S)
 XF_ENTRY_RE = re.compile(r"<xf\b.*?(?:/>|>.*?</xf>)", re.S)
 SHEET_CELL_RE = re.compile(r'(<c r="([A-Z]+\d+)"[^>]*\ss=")(\d+)(")')
+
+
+def _insert_print_block(sheet: str, block: str) -> str:
+    for anchor in ("<drawing ", "<drawing>", "</worksheet>"):
+        idx = sheet.find(anchor)
+        if idx != -1:
+            return sheet[:idx] + block + sheet[idx:]
+    return sheet + block
+
+
+def _ensure_page_margins(sheet: str) -> str:
+    if PAGE_MARGINS_RE.search(sheet):
+        return sheet
+    return _insert_print_block(sheet, DEFAULT_PAGE_MARGINS_XML)
+
+
+def _ensure_page_setup(sheet: str) -> str:
+    if PAGE_SETUP_RE.search(sheet):
+        return sheet
+    return _insert_print_block(sheet, DEFAULT_PAGE_SETUP_XML)
+
+
+def _patch_sheet1_xml(xlsx_bytes: bytes, mutator) -> bytes:
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            content = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                sheet = content.decode("utf-8")
+                sheet = mutator(sheet)
+                content = sheet.encode("utf-8")
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+def _normalized_page_margins(
+    attrs: str,
+    *,
+    left: str | None = None,
+    right: str | None = None,
+) -> str:
+    left_match = MARGIN_LEFT_ATTR_RE.search(attrs)
+    right_match = MARGIN_RIGHT_ATTR_RE.search(attrs)
+    left_val = left if left is not None else (left_match.group(1) if left_match else "0.7")
+    right_val = right if right is not None else (right_match.group(1) if right_match else "0.7")
+
+    def _attr(name: str, default: str) -> str:
+        match = re.search(rf'\b{name}="([^"]+)"', attrs)
+        return match.group(1) if match else default
+
+    return (
+        f'<pageMargins left="{left_val}" right="{right_val}" '
+        f'top="{_attr("top", "0.75")}" bottom="{_attr("bottom", "0.75")}" '
+        f'header="{_attr("header", "0.3")}" footer="{_attr("footer", "0.3")}"/>'
+    )
 
 
 def build_libreoffice_cmd(src: Path, out_dir: Path) -> list[str]:
@@ -88,27 +160,24 @@ def _page_setup_scale() -> int | None:
 
 def patch_page_setup_scale(xlsx_bytes: bytes, scale: int) -> bytes:
     """sheet1 の pageSetup に scale を設定して xlsx バイト列を返す。"""
-    out_buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
-        out_buf, "w"
-    ) as zout:
-        for item in zin.infolist():
-            content = zin.read(item.filename)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                sheet = content.decode("utf-8")
 
-                def repl(match: re.Match[str]) -> str:
-                    attrs = match.group(1)
-                    if SCALE_ATTR_RE.search(attrs):
-                        attrs = SCALE_ATTR_RE.sub(f'scale="{scale}"', attrs)
-                    else:
-                        attrs = f' scale="{scale}"{attrs}'
-                    return f"<pageSetup{attrs}/>"
+    def mutator(sheet: str) -> str:
+        sheet = _ensure_page_setup(sheet)
 
-                sheet = PAGE_SETUP_RE.sub(repl, sheet, count=1)
-                content = sheet.encode("utf-8")
-            zout.writestr(item, content)
-    return out_buf.getvalue()
+        def repl(match: re.Match[str]) -> str:
+            attrs = match.group(1)
+            if SCALE_ATTR_RE.search(attrs):
+                attrs = SCALE_ATTR_RE.sub(f'scale="{scale}"', attrs)
+            else:
+                attrs = f' scale="{scale}"{attrs}'
+            return (
+                f'<pageSetup paperSize="9" scale="{scale}" fitToHeight="0" '
+                f'orientation="portrait" r:id="rId1"/>'
+            )
+
+        return PAGE_SETUP_RE.sub(repl, sheet, count=1)
+
+    return _patch_sheet1_xml(xlsx_bytes, mutator)
 
 
 def _page_margin_left() -> str | None:
@@ -135,27 +204,16 @@ def read_page_margins_left(xlsx_bytes: bytes) -> str | None:
 
 def patch_page_margins_left(xlsx_bytes: bytes, left: str) -> bytes:
     """sheet1 の pageMargins left を設定して xlsx バイト列を返す。"""
-    out_buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
-        out_buf, "w"
-    ) as zout:
-        for item in zin.infolist():
-            content = zin.read(item.filename)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                sheet = content.decode("utf-8")
 
-                def repl(match: re.Match[str]) -> str:
-                    attrs = match.group(1)
-                    if MARGIN_LEFT_ATTR_RE.search(attrs):
-                        attrs = MARGIN_LEFT_ATTR_RE.sub(f'left="{left}"', attrs)
-                    else:
-                        attrs = f' left="{left}"{attrs}'
-                    return f"<pageMargins{attrs}/>"
+    def mutator(sheet: str) -> str:
+        sheet = _ensure_page_margins(sheet)
+        return PAGE_MARGINS_RE.sub(
+            lambda match: _normalized_page_margins(match.group(1), left=left),
+            sheet,
+            count=1,
+        )
 
-                sheet = PAGE_MARGINS_RE.sub(repl, sheet, count=1)
-                content = sheet.encode("utf-8")
-            zout.writestr(item, content)
-    return out_buf.getvalue()
+    return _patch_sheet1_xml(xlsx_bytes, mutator)
 
 
 def _page_margin_right() -> str | None:
@@ -182,27 +240,16 @@ def read_page_margins_right(xlsx_bytes: bytes) -> str | None:
 
 def patch_page_margins_right(xlsx_bytes: bytes, right: str) -> bytes:
     """sheet1 の pageMargins right を設定して xlsx バイト列を返す。"""
-    out_buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
-        out_buf, "w"
-    ) as zout:
-        for item in zin.infolist():
-            content = zin.read(item.filename)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                sheet = content.decode("utf-8")
 
-                def repl(match: re.Match[str]) -> str:
-                    attrs = match.group(1)
-                    if MARGIN_RIGHT_ATTR_RE.search(attrs):
-                        attrs = MARGIN_RIGHT_ATTR_RE.sub(f'right="{right}"', attrs)
-                    else:
-                        attrs = f' right="{right}"{attrs}'
-                    return f"<pageMargins{attrs}/>"
+    def mutator(sheet: str) -> str:
+        sheet = _ensure_page_margins(sheet)
+        return PAGE_MARGINS_RE.sub(
+            lambda match: _normalized_page_margins(match.group(1), right=right),
+            sheet,
+            count=1,
+        )
 
-                sheet = PAGE_MARGINS_RE.sub(repl, sheet, count=1)
-                content = sheet.encode("utf-8")
-            zout.writestr(item, content)
-    return out_buf.getvalue()
+    return _patch_sheet1_xml(xlsx_bytes, mutator)
 
 
 def _logo_footer_shrink_pt() -> float:
