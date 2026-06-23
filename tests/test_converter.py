@@ -44,11 +44,13 @@ class PageSetupTests(unittest.TestCase):
         scale = read_page_setup_scale(SAMPLE_XLSX.read_bytes())
         self.assertEqual(scale, 85)
 
-    def test_prepare_preserves_original_scale(self) -> None:
+    def test_prepare_applies_lo_compensation(self) -> None:
         from app.converter import _prepare_xlsx_bytes
 
         prepared = _prepare_xlsx_bytes(SAMPLE_XLSX.read_bytes(), ".xlsx", None)
-        self.assertEqual(read_page_setup_scale(prepared), 85)
+        self.assertEqual(read_page_margins_left(prepared), "1.0")
+        self.assertEqual(read_page_margins_right(prepared), "0")
+        self.assertEqual(read_page_setup_scale(prepared), 88)
 
 
 def _cell_font_size(data: bytes, ref: str) -> float | None:
@@ -114,13 +116,13 @@ class AlternateSamplePrintSettingsTests(unittest.TestCase):
         self.assertEqual(read_page_margins_right(original), "0.7")
         self.assertEqual(read_page_setup_scale(original), 85)
 
-    def test_prepare_normalizes_alt_sample_preserving_values(self) -> None:
+    def test_prepare_normalizes_and_applies_lo_compensation_to_alt_sample(self) -> None:
         from app.converter import _prepare_xlsx_bytes
 
         prepared = _prepare_xlsx_bytes(SAMPLE_XLSX_ALT.read_bytes(), ".xlsx", None)
-        self.assertEqual(read_page_margins_left(prepared), "0.7")
-        self.assertEqual(read_page_margins_right(prepared), "0.7")
-        self.assertEqual(read_page_setup_scale(prepared), 85)
+        self.assertEqual(read_page_margins_left(prepared), "1.0")
+        self.assertEqual(read_page_margins_right(prepared), "0")
+        self.assertEqual(read_page_setup_scale(prepared), 88)
 
     def test_alt_sample_fits_one_page_when_libreoffice_available(self) -> None:
         if not _libreoffice_available():

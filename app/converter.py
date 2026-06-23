@@ -45,10 +45,12 @@ DEFAULT_PAGE_SETUP_XML = (
     'orientation="portrait" r:id="rId1"/>'
 )
 
-# 印刷設定の値上書きは環境変数で明示したときだけ行う（既定は xlsx 原本を尊重）。
-DEFAULT_PAGE_MARGIN_LEFT = ""
-DEFAULT_PAGE_MARGIN_RIGHT = ""
-DEFAULT_PAGE_SETUP_SCALE = ""
+# LibreOffice(Docker) は xlsx の 0.7/0.7/85% より左寄りに出力する。
+# 完了報告書では left=1.0 / right=0 / scale=88% で Excel PDF に近づく（2544094_prod 相当）。
+# 2544674 は閉じタグ形式のため normalize_print_settings で先に整えてから適用する。
+DEFAULT_PAGE_MARGIN_LEFT = "1.0"
+DEFAULT_PAGE_MARGIN_RIGHT = "0"
+DEFAULT_PAGE_SETUP_SCALE = "88"
 SZ_VAL_RE = re.compile(r'(<sz val=")(\d+(?:\.\d+)?)(")')
 
 # ロゴ直下の会社情報（3 行）。セル単位でフォントだけ縮小する。
@@ -164,7 +166,7 @@ def _page_setup_scale() -> int | None:
     try:
         return int(raw)
     except ValueError:
-        return None
+        return int(DEFAULT_PAGE_SETUP_SCALE) if DEFAULT_PAGE_SETUP_SCALE.isdigit() else None
 
 
 def patch_page_setup_scale(xlsx_bytes: bytes, scale: int) -> bytes:
