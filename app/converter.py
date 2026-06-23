@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -44,12 +45,10 @@ DEFAULT_PAGE_SETUP_XML = (
     'orientation="portrait" r:id="rId1"/>'
 )
 
-# LibreOffice は xlsx の左余白をそのまま使うが、Excel 本体の PDF 出力より左寄りになる。
-# 完了報告書サンプルでは left=0.7 → 1.0 で Excel 出力に近づく。
-DEFAULT_PAGE_MARGIN_LEFT = "1.0"
-DEFAULT_PAGE_MARGIN_RIGHT = "0"
-# 完了報告書サンプルでは 88% で 1 ページに収まる（xlsx 原本は 85%）。
-DEFAULT_PAGE_SETUP_SCALE = 88
+# 印刷設定の値上書きは環境変数で明示したときだけ行う（既定は xlsx 原本を尊重）。
+DEFAULT_PAGE_MARGIN_LEFT = ""
+DEFAULT_PAGE_MARGIN_RIGHT = ""
+DEFAULT_PAGE_SETUP_SCALE = ""
 SZ_VAL_RE = re.compile(r'(<sz val=")(\d+(?:\.\d+)?)(")')
 
 # ロゴ直下の会社情報（3 行）。セル単位でフォントだけ縮小する。
@@ -118,9 +117,19 @@ def _normalized_page_margins(
     )
 
 
+def _libreoffice_bin() -> str:
+    override = os.environ.get("LIBREOFFICE_BIN", "").strip()
+    if override:
+        return override
+    for name in ("libreoffice", "soffice"):
+        if shutil.which(name):
+            return name
+    return "libreoffice"
+
+
 def build_libreoffice_cmd(src: Path, out_dir: Path) -> list[str]:
     return [
-        "libreoffice",
+        _libreoffice_bin(),
         "--headless",
         "--norestore",
         "--nologo",
@@ -149,13 +158,13 @@ def read_page_setup_scale(xlsx_bytes: bytes) -> int | None:
 
 
 def _page_setup_scale() -> int | None:
-    raw = os.environ.get("PAGE_SETUP_SCALE", str(DEFAULT_PAGE_SETUP_SCALE)).strip()
+    raw = os.environ.get("PAGE_SETUP_SCALE", DEFAULT_PAGE_SETUP_SCALE).strip()
     if raw.lower() in ("", "off", "none"):
         return None
     try:
         return int(raw)
     except ValueError:
-        return DEFAULT_PAGE_SETUP_SCALE
+        return None
 
 
 def patch_page_setup_scale(xlsx_bytes: bytes, scale: int) -> bytes:
@@ -236,6 +245,40 @@ def read_page_margins_right(xlsx_bytes: bytes) -> str | None:
     if not right_match:
         return None
     return right_match.group(1)
+
+
+def normalize_print_settings(xlsx_bytes: bytes) -> bytes:
+    """pageMargins/pageSetup を LibreOffice が読める形式に整える。値は原本を維持する。"""
+
+    def mutator(sheet: str) -> str:
+        if PAGE_MARGINS_RE.search(sheet):
+            sheet = PAGE_MARGINS_RE.sub(
+                lambda match: _normalized_page_margins(match.group(1)),
+                sheet,
+                count=1,
+            )
+        else:
+            sheet = _insert_print_block(sheet, DEFAULT_PAGE_MARGINS_XML)
+
+        if PAGE_SETUP_RE.search(sheet):
+
+            def repl_setup(match: re.Match[str]) -> str:
+                attrs = match.group(1)
+                scale_match = SCALE_ATTR_RE.search(attrs)
+                scale_val = scale_match.group(1) if scale_match else "85"
+                orient_match = re.search(r'\borientation="([^"]+)"', attrs)
+                orient_val = orient_match.group(1) if orient_match else "portrait"
+                return (
+                    f'<pageSetup paperSize="9" scale="{scale_val}" fitToHeight="0" '
+                    f'orientation="{orient_val}" r:id="rId1"/>'
+                )
+
+            sheet = PAGE_SETUP_RE.sub(repl_setup, sheet, count=1)
+        else:
+            sheet = _insert_print_block(sheet, DEFAULT_PAGE_SETUP_XML)
+        return sheet
+
+    return _patch_sheet1_xml(xlsx_bytes, mutator)
 
 
 def patch_page_margins_right(xlsx_bytes: bytes, right: str) -> bytes:
@@ -389,6 +432,7 @@ def _prepare_xlsx_bytes(
     shrink_pt = _logo_footer_shrink_pt()
     if shrink_pt > 0:
         xlsx_bytes = patch_logo_footer_font_sizes(xlsx_bytes, shrink_pt=shrink_pt)
+    xlsx_bytes = normalize_print_settings(xlsx_bytes)
     margin_left = _page_margin_left()
     if margin_left is not None:
         xlsx_bytes = patch_page_margins_left(xlsx_bytes, margin_left)
@@ -519,28 +563,16 @@ def find_best_scale(xlsx_bytes: bytes, suffix: str, tmp_out: Path) -> int | None
     return best
 
 
-def _should_adjust_scale(suffix: str) -> bool:
-    """固定倍率が無いときだけ、必要に応じて倍率探索を行う。"""
-    if _page_setup_scale() is not None:
-        return False
-    return PDF_SCALE_ADJUST or (
-        suffix == ".xlsx" and _page_margin_left() is not None
-    )
-
-
 def _convert_bytes_to_pdf_bytes(xlsx_bytes: bytes, suffix: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_out = Path(tmp) / "out"
         tmp_out.mkdir()
 
-        if _should_adjust_scale(suffix) and suffix == ".xlsx":
+        pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, None, tmp_out)
+        if suffix == ".xlsx" and not pdf_is_acceptable(pdf_bytes):
             scale = find_best_scale(xlsx_bytes, suffix, tmp_out)
-            if scale is None:
-                pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, None, tmp_out)
-            else:
+            if scale is not None:
                 pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, scale, tmp_out)
-        else:
-            pdf_bytes = _convert_at_scale(xlsx_bytes, suffix, None, tmp_out)
 
         return keep_first_page_only(pdf_bytes)
 
