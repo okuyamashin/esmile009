@@ -14,12 +14,14 @@ from app.converter import (
     patch_logo_footer_font_sizes,
     patch_page_margins_left,
     patch_page_margins_right,
+    patch_remarks_bottom_padding,
     pdf_has_overflow_on_page2,
     pdf_is_acceptable,
     pdf_page_count,
     read_page_margins_left,
     read_page_margins_right,
     read_page_setup_scale,
+    read_remarks_cell_text,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,6 +134,36 @@ class AlternateSamplePrintSettingsTests(unittest.TestCase):
         pdf_bytes = _convert_bytes_to_pdf_bytes(SAMPLE_XLSX_ALT.read_bytes(), ".xlsx")
         self.assertEqual(pdf_page_count(pdf_bytes), 1)
         self.assertGreater(len(pdf_bytes), 1000)
+
+
+class RemarksPaddingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SAMPLE_XLSX.is_file() or not SAMPLE_XLSX_ALT.is_file():
+            raise unittest.SkipTest("sample xlsx not found")
+
+    def test_adds_two_blank_lines_to_remarks(self) -> None:
+        def norm(text: str) -> str:
+            return text.replace("\r\n", "\n").replace("\r", "\n")
+
+        for sample in (SAMPLE_XLSX, SAMPLE_XLSX_ALT):
+            with self.subTest(sample=sample.name):
+                original = read_remarks_cell_text(sample.read_bytes())
+                self.assertIsNotNone(original)
+                patched = patch_remarks_bottom_padding(sample.read_bytes(), padding_lines=2)
+                updated = read_remarks_cell_text(patched)
+                self.assertEqual(norm(updated), norm(f"{original.rstrip()}\n\n"))
+
+    def test_prepare_includes_remarks_padding(self) -> None:
+        from app.converter import _prepare_xlsx_bytes
+
+        def norm(text: str) -> str:
+            return text.replace("\r\n", "\n").replace("\r", "\n")
+
+        original = read_remarks_cell_text(SAMPLE_XLSX.read_bytes())
+        prepared = _prepare_xlsx_bytes(SAMPLE_XLSX.read_bytes(), ".xlsx", None)
+        updated = read_remarks_cell_text(prepared)
+        self.assertEqual(norm(updated), norm(f"{original.rstrip()}\n\n"))
 
 
 class LogoFooterFontPatchTests(unittest.TestCase):

@@ -60,6 +60,15 @@ FONT_ENTRY_RE = re.compile(r"<font>.*?</font>", re.S)
 CELLXFS_BLOCK_RE = re.compile(r"<cellXfs count=\"(\d+)\">(.*?)</cellXfs>", re.S)
 XF_ENTRY_RE = re.compile(r"<xf\b.*?(?:/>|>.*?</xf>)", re.S)
 SHEET_CELL_RE = re.compile(r'(<c r="([A-Z]+\d+)"[^>]*\ss=")(\d+)(")')
+CELL_BLOCK_RE = re.compile(r'(<c r="([A-Z]+\d+)"[^>]*)(?:/>|>.*?</c>)', re.S)
+MERGE_CELL_RE = re.compile(r'<mergeCell ref="([^"]+)"')
+SHARED_STRINGS_BLOCK_RE = re.compile(
+    r"<sst\b[^>]*>(.*?)</sst>",
+    re.S,
+)
+SHARED_STRING_ENTRY_RE = re.compile(r"<si>.*?</si>", re.S)
+REMARKS_LABEL = "【備考】"
+DEFAULT_REMARKS_PADDING_LINES = 2
 
 
 def _insert_print_block(sheet: str, block: str) -> str:
@@ -424,6 +433,274 @@ def patch_logo_footer_font_sizes(
     return out_buf.getvalue()
 
 
+def _remarks_padding_lines() -> int:
+    raw = os.environ.get(
+        "REMARKS_BOTTOM_PADDING_LINES",
+        str(DEFAULT_REMARKS_PADDING_LINES),
+    ).strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_REMARKS_PADDING_LINES
+
+
+def _xml_decode_text(text: str) -> str:
+    return (
+        text.replace("&#xA;", "\n")
+        .replace("&#xD;", "\r")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+    )
+
+
+def _xml_encode_text(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\r\n", "&#xA;")
+        .replace("\n", "&#xA;")
+        .replace("\r", "&#xA;")
+    )
+
+
+def _parse_shared_strings(shared_strings_xml: str) -> list[str]:
+    block = SHARED_STRINGS_BLOCK_RE.search(shared_strings_xml)
+    if not block:
+        return []
+    return [
+        _xml_decode_text(re.sub(r"<[^>]+>", "", entry))
+        for entry in SHARED_STRING_ENTRY_RE.findall(block.group(1))
+    ]
+
+
+def _serialize_shared_strings(shared_strings_xml: str, values: list[str]) -> str:
+    match = re.search(r"(<sst\b[^>]*>)(.*?)(</sst>)", shared_strings_xml, re.S)
+    if not match:
+        return shared_strings_xml
+    opening = re.sub(r'\bcount="\d+"', f'count="{len(values)}"', match.group(1))
+    opening = re.sub(r'\buniqueCount="\d+"', f'uniqueCount="{len(values)}"', opening)
+    entries = "".join(f"<si><t>{_xml_encode_text(value)}</t></si>" for value in values)
+    return (
+        shared_strings_xml[: match.start()]
+        + opening
+        + entries
+        + match.group(3)
+        + shared_strings_xml[match.end() :]
+    )
+
+
+def _read_sheet_cell_text(
+    sheet: str,
+    ref: str,
+    shared_values: list[str],
+) -> str | None:
+    match = re.search(rf'<c r="{re.escape(ref)}"[^/]*?(?:/>|>.*?</c>)', sheet, re.S)
+    if not match:
+        return None
+    cell = match.group(0)
+    if ' t="s"' in cell:
+        value_match = re.search(r"<v>(\d+)</v>", cell)
+        if not value_match:
+            return None
+        idx = int(value_match.group(1))
+        if idx >= len(shared_values):
+            return None
+        return shared_values[idx]
+    if ' t="str"' in cell or ' t="inlineStr"' in cell:
+        value_match = re.search(r"<v>(.*?)</v>", cell, re.S)
+        if value_match:
+            return _xml_decode_text(value_match.group(1))
+        inline = re.findall(r"<t[^>]*>(.*?)</t>", cell, re.S)
+        if inline:
+            return _xml_decode_text("".join(inline))
+    value_match = re.search(r"<v>(.*?)</v>", cell, re.S)
+    if value_match:
+        return _xml_decode_text(value_match.group(1))
+    return None
+
+
+def _find_remarks_content_ref(sheet: str, shared_values: list[str]) -> str | None:
+    for match in re.finditer(r'<c r="([A-Z]+)(\d+)"', sheet):
+        ref = f"{match.group(1)}{match.group(2)}"
+        text = _read_sheet_cell_text(sheet, ref, shared_values)
+        if text and REMARKS_LABEL in text:
+            return f"A{int(match.group(2)) + 1}"
+
+    for merge_ref in MERGE_CELL_RE.findall(sheet):
+        start, _end = merge_ref.split(":", 1)
+        row_match = re.search(r"\d+", start)
+        if start.startswith("A") and row_match and int(row_match.group()) >= 25:
+            return start
+    return None
+
+
+def _xf_with_remarks_alignment(xf_xml: str) -> str:
+    if re.search(r"<alignment\b", xf_xml):
+
+        def repl_alignment(match: re.Match[str]) -> str:
+            alignment = match.group(0)
+            if re.search(r'vertical="', alignment):
+                alignment = re.sub(r'vertical="[^"]*"', 'vertical="top"', alignment)
+            else:
+                alignment = alignment.replace("<alignment ", '<alignment vertical="top" ', 1)
+            if re.search(r'shrinkToFit="', alignment):
+                alignment = re.sub(r'shrinkToFit="[^"]*"', 'shrinkToFit="0"', alignment)
+            else:
+                alignment = alignment.replace("<alignment ", '<alignment shrinkToFit="0" ', 1)
+            if 'wrapText=' not in alignment:
+                alignment = alignment.replace("<alignment ", '<alignment wrapText="1" ', 1)
+            return alignment
+
+        return re.sub(r"<alignment\b[^>]*/>|<alignment\b[^>]*>.*?</alignment>", repl_alignment, xf_xml, count=1)
+
+    if xf_xml.endswith("/>"):
+        return xf_xml[:-2] + ' applyAlignment="1"><alignment horizontal="left" vertical="top" wrapText="1" shrinkToFit="0"/></xf>'
+    return re.sub(
+        r"(<xf\b[^>]*)(>.*?</xf>|/>)",
+        r'\1 applyAlignment="1"><alignment horizontal="left" vertical="top" wrapText="1" shrinkToFit="0"/>\2',
+        xf_xml,
+        count=1,
+    )
+
+
+def _pad_remarks_text(text: str, extra_lines: int) -> str:
+    normalized = text.rstrip("\r\n")
+    if extra_lines <= 0:
+        return normalized
+    return normalized + ("\n" * extra_lines)
+
+
+def patch_remarks_bottom_padding(
+    xlsx_bytes: bytes,
+    padding_lines: int | None = None,
+) -> bytes:
+    """備考結合セルの本文末尾に空行を足し、上詰め表示にする。"""
+    extra_lines = _remarks_padding_lines() if padding_lines is None else max(0, padding_lines)
+    if extra_lines <= 0:
+        return xlsx_bytes
+
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin:
+        sheet = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        styles = zin.read("xl/styles.xml").decode("utf-8")
+        shared_strings_xml = (
+            zin.read("xl/sharedStrings.xml").decode("utf-8")
+            if "xl/sharedStrings.xml" in zin.namelist()
+            else ""
+        )
+
+    shared_values = _parse_shared_strings(shared_strings_xml)
+    remarks_ref = _find_remarks_content_ref(sheet, shared_values)
+    if not remarks_ref:
+        return xlsx_bytes
+
+    current_text = _read_sheet_cell_text(sheet, remarks_ref, shared_values)
+    if current_text is None:
+        return xlsx_bytes
+
+    padded_text = _pad_remarks_text(current_text, extra_lines)
+    if padded_text == current_text:
+        return xlsx_bytes
+
+    cell_match = re.search(
+        rf'(<c r="{re.escape(remarks_ref)}"[^/]*)(?:/>|>.*?</c>)',
+        sheet,
+        re.S,
+    )
+    if not cell_match:
+        return xlsx_bytes
+
+    cell_xml = cell_match.group(0)
+    style_match = re.search(r'\ss="(\d+)"', cell_xml)
+    xfs_match = CELLXFS_BLOCK_RE.search(styles)
+    if style_match and xfs_match:
+        xfs = XF_ENTRY_RE.findall(xfs_match.group(2))
+        old_style = int(style_match.group(1))
+        if old_style < len(xfs):
+            new_xf = _xf_with_remarks_alignment(xfs[old_style])
+            new_style_id = next((idx for idx, xf in enumerate(xfs) if xf == new_xf), None)
+            if new_style_id is None:
+                xfs.append(new_xf)
+                new_style_id = len(xfs) - 1
+            styles = styles.replace(
+                xfs_match.group(0),
+                f'<cellXfs count="{len(xfs)}">{"".join(xfs)}</cellXfs>',
+            )
+            sheet = sheet.replace(
+                cell_xml,
+                re.sub(r'\ss="\d+"', f' s="{new_style_id}"', cell_xml, count=1),
+                1,
+            )
+            cell_xml = re.search(
+                rf'(<c r="{re.escape(remarks_ref)}"[^/]*)(?:/>|>.*?</c>)',
+                sheet,
+                re.S,
+            ).group(0)
+
+    if ' t="s"' in cell_xml:
+        idx_match = re.search(r"<v>(\d+)</v>", cell_xml)
+        if not idx_match:
+            return xlsx_bytes
+        idx = int(idx_match.group(1))
+        if idx >= len(shared_values):
+            shared_values.extend([""] * (idx + 1 - len(shared_values)))
+        shared_values[idx] = padded_text
+        shared_strings_xml = _serialize_shared_strings(shared_strings_xml, shared_values)
+    elif ' t="str"' in cell_xml or ' t="inlineStr"' in cell_xml:
+        encoded = _xml_encode_text(padded_text)
+        if "<v>" in cell_xml:
+            new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
+        else:
+            new_cell = re.sub(
+                r"<is>.*?</is>",
+                f"<is><t>{encoded}</t></is>",
+                cell_xml,
+                count=1,
+                flags=re.S,
+            )
+        sheet = sheet.replace(cell_xml, new_cell, 1)
+    else:
+        encoded = _xml_encode_text(padded_text)
+        if "<v>" in cell_xml:
+            new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
+            sheet = sheet.replace(cell_xml, new_cell, 1)
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            if item.filename == "xl/styles.xml":
+                content = styles.encode("utf-8")
+            elif item.filename == "xl/worksheets/sheet1.xml":
+                content = sheet.encode("utf-8")
+            elif item.filename == "xl/sharedStrings.xml" and shared_strings_xml:
+                content = shared_strings_xml.encode("utf-8")
+            else:
+                content = zin.read(item.filename)
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+def read_remarks_cell_text(xlsx_bytes: bytes) -> str | None:
+    """備考本文セルの文字列を返す。無ければ None。"""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin:
+        if "xl/worksheets/sheet1.xml" not in zin.namelist():
+            return None
+        sheet = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        shared_strings_xml = (
+            zin.read("xl/sharedStrings.xml").decode("utf-8")
+            if "xl/sharedStrings.xml" in zin.namelist()
+            else ""
+        )
+    shared_values = _parse_shared_strings(shared_strings_xml)
+    remarks_ref = _find_remarks_content_ref(sheet, shared_values)
+    if not remarks_ref:
+        return None
+    return _read_sheet_cell_text(sheet, remarks_ref, shared_values)
+
+
 def _prepare_xlsx_bytes(
     xlsx_bytes: bytes,
     suffix: str,
@@ -434,6 +711,7 @@ def _prepare_xlsx_bytes(
     shrink_pt = _logo_footer_shrink_pt()
     if shrink_pt > 0:
         xlsx_bytes = patch_logo_footer_font_sizes(xlsx_bytes, shrink_pt=shrink_pt)
+    xlsx_bytes = patch_remarks_bottom_padding(xlsx_bytes)
     xlsx_bytes = normalize_print_settings(xlsx_bytes)
     margin_left = _page_margin_left()
     if margin_left is not None:
