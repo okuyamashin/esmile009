@@ -11,6 +11,7 @@ from app.converter import (
     drop_blank_page2,
     find_best_scale,
     page2_text,
+    patch_blank_customer_name,
     patch_logo_footer_font_sizes,
     patch_page_margins_left,
     patch_page_margins_right,
@@ -18,6 +19,7 @@ from app.converter import (
     pdf_has_overflow_on_page2,
     pdf_is_acceptable,
     pdf_page_count,
+    read_customer_name_text,
     read_page_margins_left,
     read_page_margins_right,
     read_page_setup_scale,
@@ -164,6 +166,73 @@ class RemarksPaddingTests(unittest.TestCase):
         prepared = _prepare_xlsx_bytes(SAMPLE_XLSX.read_bytes(), ".xlsx", None)
         updated = read_remarks_cell_text(prepared)
         self.assertEqual(norm(updated), norm(f"{original.rstrip()}\n\n"))
+
+
+def _xlsx_with_customer_name(xlsx_bytes: bytes, customer_name: str) -> bytes:
+    import io
+    import zipfile
+
+    from app.converter import (
+        _find_customer_name_ref,
+        _parse_shared_strings,
+        _write_sheet_cell_text,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin:
+        sheet = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        shared_strings_xml = (
+            zin.read("xl/sharedStrings.xml").decode("utf-8")
+            if "xl/sharedStrings.xml" in zin.namelist()
+            else ""
+        )
+    shared_values = _parse_shared_strings(shared_strings_xml)
+    customer_ref = _find_customer_name_ref(sheet, shared_values)
+    if not customer_ref:
+        raise ValueError("customer name cell not found")
+    sheet, shared_values, shared_strings_xml = _write_sheet_cell_text(
+        sheet,
+        customer_ref,
+        shared_values,
+        shared_strings_xml,
+        customer_name,
+    )
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            if item.filename == "xl/worksheets/sheet1.xml":
+                content = sheet.encode("utf-8")
+            elif item.filename == "xl/sharedStrings.xml" and shared_strings_xml:
+                content = shared_strings_xml.encode("utf-8")
+            else:
+                content = zin.read(item.filename)
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+class CustomerNameTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SAMPLE_XLSX.is_file():
+            raise unittest.SkipTest(f"sample not found: {SAMPLE_XLSX}")
+
+    def test_keeps_normal_customer_name(self) -> None:
+        data = _xlsx_with_customer_name(SAMPLE_XLSX.read_bytes(), "オガワ 様")
+        patched = patch_blank_customer_name(data)
+        self.assertEqual(read_customer_name_text(patched), "オガワ 様")
+
+    def test_clears_blank_like_customer_names(self) -> None:
+        for name in ("空室 様", "不明 様", "  様", "　様", "  \u3000  "):
+            with self.subTest(name=name):
+                data = _xlsx_with_customer_name(SAMPLE_XLSX.read_bytes(), name)
+                patched = patch_blank_customer_name(data)
+                self.assertEqual(read_customer_name_text(patched), "")
+
+    def test_clears_when_marker_is_part_of_name(self) -> None:
+        data = _xlsx_with_customer_name(SAMPLE_XLSX.read_bytes(), "空室テスト 様")
+        patched = patch_blank_customer_name(data)
+        self.assertEqual(read_customer_name_text(patched), "")
 
 
 class LogoFooterFontPatchTests(unittest.TestCase):

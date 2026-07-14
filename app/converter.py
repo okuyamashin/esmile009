@@ -69,6 +69,9 @@ SHARED_STRINGS_BLOCK_RE = re.compile(
 SHARED_STRING_ENTRY_RE = re.compile(r"<si>.*?</si>", re.S)
 REMARKS_LABEL = "【備考】"
 DEFAULT_REMARKS_PADDING_LINES = 2
+CUSTOMER_NAME_LABEL = "お客様名"
+CUSTOMER_CLEAR_MARKERS = ("空室", "不明")
+SAMAS_RE = re.compile(r"[\s\u3000]*様[\s\u3000]*$")
 
 
 def _insert_print_block(sheet: str, block: str) -> str:
@@ -521,6 +524,80 @@ def _read_sheet_cell_text(
     return None
 
 
+def _normalize_spacing(text: str) -> str:
+    return re.sub(r"[\s\u3000]+", " ", text).strip()
+
+
+def _customer_name_core(text: str) -> str:
+    return SAMAS_RE.sub("", _normalize_spacing(text)).strip()
+
+
+def _should_clear_customer_name(text: str) -> bool:
+    core = _customer_name_core(text)
+    if not core:
+        return True
+    return any(marker in core for marker in CUSTOMER_CLEAR_MARKERS)
+
+
+def _find_customer_name_ref(sheet: str, shared_values: list[str]) -> str | None:
+    for match in re.finditer(r'<c r="([A-Z]+)(\d+)"', sheet):
+        ref = f"{match.group(1)}{match.group(2)}"
+        text = _read_sheet_cell_text(sheet, ref, shared_values)
+        if text and CUSTOMER_NAME_LABEL in text:
+            customer_ref = f"C{match.group(2)}"
+            if re.search(rf'<c r="{re.escape(customer_ref)}"', sheet):
+                return customer_ref
+    return None
+
+
+def _write_sheet_cell_text(
+    sheet: str,
+    ref: str,
+    shared_values: list[str],
+    shared_strings_xml: str,
+    new_text: str,
+) -> tuple[str, list[str], str]:
+    cell_match = re.search(
+        rf'(<c r="{re.escape(ref)}"[^/]*)(?:/>|>.*?</c>)',
+        sheet,
+        re.S,
+    )
+    if not cell_match:
+        return sheet, shared_values, shared_strings_xml
+
+    cell_xml = cell_match.group(0)
+    if ' t="s"' in cell_xml:
+        idx_match = re.search(r"<v>(\d+)</v>", cell_xml)
+        if not idx_match:
+            return sheet, shared_values, shared_strings_xml
+        idx = int(idx_match.group(1))
+        if idx >= len(shared_values):
+            shared_values.extend([""] * (idx + 1 - len(shared_values)))
+        shared_values[idx] = new_text
+        shared_strings_xml = _serialize_shared_strings(shared_strings_xml, shared_values)
+        return sheet, shared_values, shared_strings_xml
+
+    encoded = _xml_encode_text(new_text)
+    if ' t="str"' in cell_xml or ' t="inlineStr"' in cell_xml:
+        if "<v>" in cell_xml:
+            new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
+        else:
+            new_cell = re.sub(
+                r"<is>.*?</is>",
+                f"<is><t>{encoded}</t></is>",
+                cell_xml,
+                count=1,
+                flags=re.S,
+            )
+    elif "<v>" in cell_xml:
+        new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
+    else:
+        return sheet, shared_values, shared_strings_xml
+
+    sheet = sheet.replace(cell_xml, new_cell, 1)
+    return sheet, shared_values, shared_strings_xml
+
+
 def _find_remarks_content_ref(sheet: str, shared_values: list[str]) -> str | None:
     for match in re.finditer(r'<c r="([A-Z]+)(\d+)"', sheet):
         ref = f"{match.group(1)}{match.group(2)}"
@@ -647,24 +724,14 @@ def patch_remarks_bottom_padding(
             shared_values.extend([""] * (idx + 1 - len(shared_values)))
         shared_values[idx] = padded_text
         shared_strings_xml = _serialize_shared_strings(shared_strings_xml, shared_values)
-    elif ' t="str"' in cell_xml or ' t="inlineStr"' in cell_xml:
-        encoded = _xml_encode_text(padded_text)
-        if "<v>" in cell_xml:
-            new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
-        else:
-            new_cell = re.sub(
-                r"<is>.*?</is>",
-                f"<is><t>{encoded}</t></is>",
-                cell_xml,
-                count=1,
-                flags=re.S,
-            )
-        sheet = sheet.replace(cell_xml, new_cell, 1)
     else:
-        encoded = _xml_encode_text(padded_text)
-        if "<v>" in cell_xml:
-            new_cell = re.sub(r"<v>.*?</v>", f"<v>{encoded}</v>", cell_xml, count=1, flags=re.S)
-            sheet = sheet.replace(cell_xml, new_cell, 1)
+        sheet, shared_values, shared_strings_xml = _write_sheet_cell_text(
+            sheet,
+            remarks_ref,
+            shared_values,
+            shared_strings_xml,
+            padded_text,
+        )
 
     out_buf = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
@@ -701,6 +768,66 @@ def read_remarks_cell_text(xlsx_bytes: bytes) -> str | None:
     return _read_sheet_cell_text(sheet, remarks_ref, shared_values)
 
 
+def patch_blank_customer_name(xlsx_bytes: bytes) -> bytes:
+    """空室・不明・空白のお客様名は「様」ごと表示しない。"""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin:
+        sheet = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        shared_strings_xml = (
+            zin.read("xl/sharedStrings.xml").decode("utf-8")
+            if "xl/sharedStrings.xml" in zin.namelist()
+            else ""
+        )
+
+    shared_values = _parse_shared_strings(shared_strings_xml)
+    customer_ref = _find_customer_name_ref(sheet, shared_values)
+    if not customer_ref:
+        return xlsx_bytes
+
+    current_text = _read_sheet_cell_text(sheet, customer_ref, shared_values)
+    if current_text is None or not _should_clear_customer_name(current_text):
+        return xlsx_bytes
+
+    sheet, shared_values, shared_strings_xml = _write_sheet_cell_text(
+        sheet,
+        customer_ref,
+        shared_values,
+        shared_strings_xml,
+        "",
+    )
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(
+        out_buf, "w"
+    ) as zout:
+        for item in zin.infolist():
+            if item.filename == "xl/worksheets/sheet1.xml":
+                content = sheet.encode("utf-8")
+            elif item.filename == "xl/sharedStrings.xml" and shared_strings_xml:
+                content = shared_strings_xml.encode("utf-8")
+            else:
+                content = zin.read(item.filename)
+            zout.writestr(item, content)
+    return out_buf.getvalue()
+
+
+def read_customer_name_text(xlsx_bytes: bytes) -> str | None:
+    """お客様名セルの文字列を返す。無ければ None。"""
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as zin:
+        if "xl/worksheets/sheet1.xml" not in zin.namelist():
+            return None
+        sheet = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        shared_strings_xml = (
+            zin.read("xl/sharedStrings.xml").decode("utf-8")
+            if "xl/sharedStrings.xml" in zin.namelist()
+            else ""
+        )
+    shared_values = _parse_shared_strings(shared_strings_xml)
+    customer_ref = _find_customer_name_ref(sheet, shared_values)
+    if not customer_ref:
+        return None
+    return _read_sheet_cell_text(sheet, customer_ref, shared_values)
+
+
 def _prepare_xlsx_bytes(
     xlsx_bytes: bytes,
     suffix: str,
@@ -712,6 +839,7 @@ def _prepare_xlsx_bytes(
     if shrink_pt > 0:
         xlsx_bytes = patch_logo_footer_font_sizes(xlsx_bytes, shrink_pt=shrink_pt)
     xlsx_bytes = patch_remarks_bottom_padding(xlsx_bytes)
+    xlsx_bytes = patch_blank_customer_name(xlsx_bytes)
     xlsx_bytes = normalize_print_settings(xlsx_bytes)
     margin_left = _page_margin_left()
     if margin_left is not None:
