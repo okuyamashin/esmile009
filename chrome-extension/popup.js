@@ -1,14 +1,10 @@
 "use strict";
 
-function normalizeBase(raw) {
-  return String(raw || "")
-    .trim()
-    .replace(/\/+$/, "");
-}
+const { resolveApiBase } = globalThis.Esmile009ApiConfig;
 
 async function getApiBaseUrl() {
   const { apiBaseUrl } = await chrome.storage.sync.get(["apiBaseUrl"]);
-  return normalizeBase(apiBaseUrl) || "https://engawa2525.com/esmile009";
+  return resolveApiBase(apiBaseUrl);
 }
 
 async function pingHealth() {
@@ -23,9 +19,9 @@ async function pingHealth() {
 
     const text = await res.text();
     el.textContent = `${res.status} ${res.statusText}\n${text}`;
-    if (!res.ok) el.textContent += `\n\nエラー詳細がある場合:\nURL=${url}`;
+    if (!res.ok) el.textContent += `\n\nURL=${url}`;
   } catch (e) {
-    el.textContent = `例外: ${String(e)}\n\nよくある原因:\n- manifest の host_permissions に API のオリジンが無い（拡張を再読み込み）\n- API の URL が違う / サーバーが落ちている / 証明書例外など`;
+    el.textContent = `例外: ${String(e)}\n\n設定の API URL を確認してください（本番: https://esmile009.engawa5656.com）`;
   }
 }
 

@@ -2,6 +2,55 @@
 
 const PDF_BTN_ID = "esmile009-pdf-download";
 const STATUS_ID = "esmile009-pdf-status";
+const PROBE_INPUT_XPATH =
+  '//*[@id="select-work-report-assign"]/table/tr[4]/div/div/div[5]/label/input';
+
+function findNodeByXPath(xpath) {
+  try {
+    return document.evaluate(
+      xpath,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null
+    ).singleNodeValue;
+  } catch (err) {
+    console.warn("[esmile009] XPath evaluate failed:", err);
+    return null;
+  }
+}
+
+function logProbeInputValue() {
+  const el = findNodeByXPath(PROBE_INPUT_XPATH);
+  if (!el) {
+    console.log("[esmile009] probe input: not found", { xpath: PROBE_INPUT_XPATH });
+    return false;
+  }
+
+  console.log("[esmile009] probe input:", {
+    xpath: PROBE_INPUT_XPATH,
+    tagName: el.tagName,
+    type: el.type,
+    value: el.value,
+    checked: el.checked,
+    id: el.id,
+    name: el.name,
+  });
+  return true;
+}
+
+function startProbeInputWatcher() {
+  if (logProbeInputValue()) return;
+
+  let attempts = 0;
+  const maxAttempts = 30;
+  const timer = setInterval(() => {
+    attempts += 1;
+    if (logProbeInputValue() || attempts >= maxAttempts) {
+      clearInterval(timer);
+    }
+  }, 500);
+}
 
 function findDownloadLink() {
   return (
@@ -120,9 +169,11 @@ function injectPdfButton() {
 }
 
 function boot() {
+  startProbeInputWatcher();
   injectPdfButton();
 
   const observer = new MutationObserver(() => {
+    logProbeInputValue();
     injectPdfButton();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });

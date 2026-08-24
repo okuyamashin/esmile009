@@ -15,6 +15,8 @@ from app.convert_store import (
     saved_filename_for_key,
     validate_saved_filename,
 )
+from app.jobs.models import JobStatus
+from app.jobs.service import get_job_service
 from app.pdf_filename import timestamp_save_key
 from app.version import APP_VERSION, health_payload
 
@@ -49,6 +51,8 @@ app = FastAPI(
 app.add_middleware(AccessLogMiddleware)
 
 router = APIRouter()
+
+JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
 def _content_disposition(filename: str) -> str:
@@ -144,6 +148,73 @@ async def convert(request: Request, file: UploadFile = File(...)) -> Response:
         content=body,
         media_type="application/pdf",
         headers=headers,
+    )
+
+
+@router.post("/jobs")
+async def create_job(request: Request, file: UploadFile = File(...)) -> dict:
+    """非同期変換ジョブを登録する（パターン A: キューに投入）。"""
+    name = (file.filename or "upload").strip()
+    suffix = Path(name).suffix.lower()
+    if suffix not in (".xlsx", ".xls"):
+        raise HTTPException(
+            status_code=400,
+            detail="拡張子は .xlsx または .xls である必要があります",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="空のファイルです")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="ファイルが大きすぎます")
+
+    set_upload_extra(request, name, len(data))
+
+    service = get_job_service()
+    record = service.create(name, data, suffix)
+    pdf_path = service.job_pdf_path(record.job_id, BASE_PATH)
+    body = record.to_dict(pdf_path=pdf_path)
+    append_access_extra(request, f'job_id="{record.job_id}" job_status="{record.status.value}"')
+    return body
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="無効な jobId です")
+
+    service = get_job_service()
+    record = service.get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="ジョブが見つかりません")
+
+    pdf_path = service.job_pdf_path(job_id, BASE_PATH)
+    return record.to_dict(pdf_path=pdf_path)
+
+
+@router.get("/jobs/{job_id}/pdf")
+def get_job_pdf(job_id: str) -> Response:
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="無効な jobId です")
+
+    service = get_job_service()
+    record = service.get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="ジョブが見つかりません")
+    if record.status == JobStatus.FAILED:
+        raise HTTPException(status_code=500, detail=record.error or "変換に失敗しました")
+    if record.status != JobStatus.DONE:
+        raise HTTPException(status_code=409, detail=f"まだ完了していません: {record.status.value}")
+
+    pdf_bytes = service.pdf_bytes(job_id)
+    if pdf_bytes is None:
+        raise HTTPException(status_code=404, detail="PDF が見つかりません")
+
+    download_name = service.pdf_download_name(job_id) or "document.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": _content_disposition(download_name)},
     )
 
 

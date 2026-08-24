@@ -19,7 +19,7 @@
 
 拡張のポップアップから **設定（API の URL）** を開いて、共通プレフィックスを保存します。
 
-- 本番例: `https://engawa2525.com/esmile009`
+- 本番: `https://esmile009.engawa5656.com`（旧: `https://engawa2525.com/esmile009`）
 - ローカル例: `http://127.0.0.1:18083`
 
 ## 動作確認

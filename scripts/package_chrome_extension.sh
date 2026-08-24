@@ -15,6 +15,7 @@ rm -f "$ZIP_PATH"
   cd "$EXT_DIR"
   zip -r "$ZIP_PATH" \
     manifest.json \
+    api-config.js \
     content-script.js \
     service-worker.js \
     popup.html \

@@ -42,9 +42,57 @@ curl -fsS -X POST http://127.0.0.1:18083/convert \
 ./stop
 ```
 
-## Chrome 拡張（準備中）
+## 非同期ジョブ（パターン A: キュー + ワーカー）
 
-`chrome-extension/` に Manifest V3 の雛形があります。開発者向け手順は同ディレクトリの `chrome-extension/README.md` を見てください。
+同期 `POST /convert` に加え、**オンデマンド向け**の非同期 API があります。
+
+| エンドポイント | 説明 |
+|----------------|------|
+| `POST /jobs` | xlsx を登録 → `{ jobId, status: "queued" }` |
+| `GET /jobs/{jobId}` | 状態確認（`done` のとき `pdfUrl`） |
+| `GET /jobs/{jobId}/pdf` | 完了後に PDF 取得 |
+
+### ローカル / Docker（検証）
+
+```bash
+docker compose up -d --build
+docker compose --profile worker up -d   # 変換ワーカーだけ別起動（オンデマンド）
+```
+
+```bash
+# ジョブ登録
+curl -fsS -X POST http://127.0.0.1:18083/jobs \
+  -F 'file=@path/to/sample.xlsx'
+
+# 状態（done まで数秒ポーリング）
+curl -sS http://127.0.0.1:18083/jobs/<jobId>
+
+# PDF 取得
+curl -fsS http://127.0.0.1:18083/jobs/<jobId>/pdf -o out.pdf
+```
+
+`JOB_BACKEND=local`（既定）では `data/jobs/` にキューと入出力を置きます。  
+**API だけ常時・ワーカーは必要時だけ**にするなら、普段は `docker compose up -d`、変換時だけ `docker compose --profile worker up -d` です。
+
+### AWS（S3 + SQS）
+
+`.env` または Compose の environment に設定:
+
+```bash
+JOB_BACKEND=aws
+JOB_S3_BUCKET=your-bucket
+JOB_SQS_QUEUE_URL=https://sqs....amazonaws.com/.../queue-name
+AWS_REGION=ap-northeast-1
+```
+
+- API: 入力を S3 に保存し SQS にメッセージ投入  
+- ワーカー: SQS をロングポール → S3 から読み込み → PDF を S3 に保存  
+
+本番ではワーカーを **ECS Fargate（desired 0↔1）** や **EC2 + worker コンテナ** でオンデマンド起動する想定です。雛形は `docker-compose.yml` の `worker` サービス（`--profile worker`）です。
+
+## Chrome 拡張
+
+`chrome-extension/` に Manifest V3 の拡張があります。本番 API の例: `https://esmile009.engawa5656.com`（詳細は `docs/aws-domain-engawa5656.md`）。
 
 ## 環境変数（Compose）
 
@@ -54,6 +102,10 @@ curl -fsS -X POST http://127.0.0.1:18083/convert \
 | `CONVERT_TIMEOUT_SEC` | LibreOffice のタイムアウト秒（既定 120） |
 | `BASE_PATH` | URL のサブパス（例: `/esmile009`）。Apache がプレフィックスを削るときは不要 |
 | `BIND_ADDRESS` | ホストにバインドするアドレス（既定 `127.0.0.1`）。**別マシンの Apache が `ProxyPass http://このEC2のIP:18083/` のときは `0.0.0.0`** にする |
+| `JOB_BACKEND` | `local`（既定）または `aws` |
+| `JOB_LOCAL_DIR` | ローカルキュー・ジョブファイルの保存先 |
+| `JOB_S3_BUCKET` | AWS 時の S3 バケット |
+| `JOB_SQS_QUEUE_URL` | AWS 時の SQS キュー URL |
 
 ホストのポートは `docker-compose.yml` の `ports` で変更してください。`convert.sh` の既定 `API_URL` も合わせて調整します。
 

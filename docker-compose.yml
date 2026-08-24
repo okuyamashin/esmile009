@@ -13,8 +13,33 @@ services:
       CONVERT_TIMEOUT_SEC: "120"
       ACCESS_LOG_FILE: "/var/log/esmile009/access.log"
       CONVERT_SAVE_DIR: "/var/lib/esmile009/convert"
+      JOB_BACKEND: "${JOB_BACKEND:-local}"
+      JOB_LOCAL_DIR: "/var/lib/esmile009/jobs"
+      JOB_S3_BUCKET: "${JOB_S3_BUCKET:-}"
+      JOB_SQS_QUEUE_URL: "${JOB_SQS_QUEUE_URL:-}"
+      AWS_REGION: "${AWS_REGION:-ap-northeast-1}"
     volumes:
       - ./samples/in:/app/samples/in:ro
       - ./logs:/var/log/esmile009
       - ./data/convert:/var/lib/esmile009/convert
+      - ./data/jobs:/var/lib/esmile009/jobs
+    restart: unless-stopped
+
+  # オンデマンド: 変換が必要なときだけ起動（docker compose --profile worker up -d）
+  worker:
+    profiles: ["worker"]
+    image: xlsx2pdf-libreoffice:local
+    container_name: xlsx2pdf-worker
+    command: ["python", "-m", "app.worker"]
+    environment:
+      CONVERT_TIMEOUT_SEC: "120"
+      JOB_BACKEND: "${JOB_BACKEND:-local}"
+      JOB_LOCAL_DIR: "/var/lib/esmile009/jobs"
+      JOB_POLL_WAIT_SEC: "20"
+      JOB_IDLE_SLEEP_SEC: "1"
+      JOB_S3_BUCKET: "${JOB_S3_BUCKET:-}"
+      JOB_SQS_QUEUE_URL: "${JOB_SQS_QUEUE_URL:-}"
+      AWS_REGION: "${AWS_REGION:-ap-northeast-1}"
+    volumes:
+      - ./data/jobs:/var/lib/esmile009/jobs
     restart: unless-stopped

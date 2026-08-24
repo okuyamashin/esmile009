@@ -1,12 +1,9 @@
 "use strict";
 
-const DEFAULT_API_BASE = "https://engawa2525.com/esmile009";
+importScripts("api-config.js");
 
-function normalizeBase(raw) {
-  return String(raw || "")
-    .trim()
-    .replace(/\/+$/, "");
-}
+const { DEFAULT_API_BASE, resolveApiBase, shouldMigrateApiBase } =
+  globalThis.Esmile009ApiConfig;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -20,7 +17,14 @@ function arrayBufferToBase64(buffer) {
 
 async function getApiBaseUrl() {
   const { apiBaseUrl } = await chrome.storage.sync.get(["apiBaseUrl"]);
-  return normalizeBase(apiBaseUrl) || DEFAULT_API_BASE;
+  return resolveApiBase(apiBaseUrl);
+}
+
+async function migrateApiBaseUrlIfNeeded() {
+  const { apiBaseUrl } = await chrome.storage.sync.get(["apiBaseUrl"]);
+  if (shouldMigrateApiBase(apiBaseUrl)) {
+    await chrome.storage.sync.set({ apiBaseUrl: DEFAULT_API_BASE });
+  }
 }
 
 function waitForDownloadComplete(downloadId) {
@@ -111,11 +115,12 @@ async function convertAndDownload(excelUrl, excelFilename, pdfFilename) {
   return { filename: savedName, apiBase };
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const { apiBaseUrl } = await chrome.storage.sync.get(["apiBaseUrl"]);
-  if (typeof apiBaseUrl !== "string" || !apiBaseUrl.trim()) {
-    await chrome.storage.sync.set({ apiBaseUrl: DEFAULT_API_BASE });
-  }
+chrome.runtime.onInstalled.addListener(() => {
+  migrateApiBaseUrlIfNeeded();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  migrateApiBaseUrlIfNeeded();
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

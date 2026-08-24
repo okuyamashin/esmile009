@@ -1,25 +1,20 @@
 "use strict";
 
-function normalizeBase(raw) {
-  return String(raw || "")
-    .trim()
-    .replace(/\/+$/, "");
-}
+const { DEFAULT_API_BASE, resolveApiBase, shouldMigrateApiBase } =
+  globalThis.Esmile009ApiConfig;
 
 async function save() {
   const input = /** @type {HTMLInputElement} */ (document.getElementById("apiBaseUrl"));
   const status = document.getElementById("status");
-  const apiBaseUrl = normalizeBase(input.value);
+  const apiBaseUrl = globalThis.Esmile009ApiConfig.normalizeBase(input.value);
 
   status.textContent = "";
 
   try {
-    // URL っぽさだけ軽く検証（厳密な検証には new URL が必要）
     if (!/^https?:\/\//i.test(apiBaseUrl)) {
       status.textContent = "http/https で始まる URL を入力してください";
       return;
     }
-    // host_permissions に無いホストだけは fetch は失敗しうるので README を参照させる
 
     await chrome.storage.sync.set({ apiBaseUrl });
 
@@ -32,8 +27,12 @@ async function save() {
 async function restore() {
   const input = /** @type {HTMLInputElement} */ (document.getElementById("apiBaseUrl"));
   const { apiBaseUrl } = await chrome.storage.sync.get(["apiBaseUrl"]);
-  input.value =
-    normalizeBase(apiBaseUrl) || "https://engawa2525.com/esmile009";
+  if (shouldMigrateApiBase(apiBaseUrl)) {
+    await chrome.storage.sync.set({ apiBaseUrl: DEFAULT_API_BASE });
+    input.value = DEFAULT_API_BASE;
+    return;
+  }
+  input.value = resolveApiBase(apiBaseUrl);
 }
 
 document.addEventListener("DOMContentLoaded", () => {

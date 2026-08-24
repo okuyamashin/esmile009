@@ -9,6 +9,7 @@ Thumbs.db
 # 環境・鍵（公開リポジトリではコミットしない）
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 
@@ -27,8 +28,15 @@ data/convert/*.pdf
 data/convert/*.xlsx
 data/convert/*.xls
 
+# 非同期ジョブ（ローカルキュー・入出力）
+data/jobs/**/*
+!data/jobs/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# ビルド成果物
+dist/
