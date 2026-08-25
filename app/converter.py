@@ -68,7 +68,9 @@ SHARED_STRINGS_BLOCK_RE = re.compile(
 )
 SHARED_STRING_ENTRY_RE = re.compile(r"<si>.*?</si>", re.S)
 REMARKS_LABEL = "【備考】"
-DEFAULT_REMARKS_PADDING_LINES = 2
+DEFAULT_REMARKS_PADDING_LINES = 12
+DEFAULT_REMARKS_LINE_HEIGHT_PT = 15.0
+REMARKS_MERGE_RE = re.compile(r"A(\d+):S(\d+)$")
 CUSTOMER_NAME_LABEL = "お客様名"
 CUSTOMER_CLEAR_MARKERS = ("空室", "不明")
 SAMAS_RE = re.compile(r"[\s\u3000]*様[\s\u3000]*$")
@@ -445,6 +447,64 @@ def _remarks_padding_lines() -> int:
         return max(0, int(raw))
     except ValueError:
         return DEFAULT_REMARKS_PADDING_LINES
+
+
+def _remarks_extra_height_pt() -> float:
+    """改行だけでは LibreOffice が枠を広げないので、末尾行の高さを足す。"""
+    extra_lines = max(0, _remarks_padding_lines() - 2)
+    return extra_lines * DEFAULT_REMARKS_LINE_HEIGHT_PT
+
+
+def _find_remarks_merge_ref(sheet: str) -> str | None:
+    found: list[tuple[int, str]] = []
+    for merge_ref in MERGE_CELL_RE.findall(sheet):
+        match = REMARKS_MERGE_RE.fullmatch(merge_ref)
+        if match and int(match.group(1)) >= 20:
+            found.append((int(match.group(1)), merge_ref))
+    if not found:
+        return None
+    return max(found)[1]
+
+
+def _add_row_height(sheet: str, row_num: int, extra_pt: float) -> str:
+    pattern = re.compile(rf'<row r="{row_num}"([^>]*)(/?)>')
+
+    def repl(match: re.Match[str]) -> str:
+        attrs, self_close = match.group(1), match.group(2)
+        ht = re.search(r'\bht="([^"]+)"', attrs)
+        if ht:
+            new_ht = float(ht.group(1)) + extra_pt
+            attrs = re.sub(r'\bht="[^"]+"', f'ht="{new_ht:g}"', attrs)
+        else:
+            attrs = f'{attrs} ht="{15 + extra_pt:g}"'
+        if "customHeight=" not in attrs:
+            attrs += ' customHeight="1"'
+        return f'<row r="{row_num}"{attrs}{self_close}>'
+
+    updated, n = pattern.subn(repl, sheet, count=1)
+    if n:
+        return updated
+    insert = f'<row r="{row_num}" ht="{15 + extra_pt:g}" customHeight="1"/>'
+    return sheet.replace("</sheetData>", f"{insert}</sheetData>", 1)
+
+
+def patch_remarks_box_height(
+    xlsx_bytes: bytes,
+    extra_pt: float | None = None,
+) -> bytes:
+    """備考の結合セル末尾行を高くして、罫線エリアに空行分の余白を作る。"""
+    extra = _remarks_extra_height_pt() if extra_pt is None else extra_pt
+    if extra <= 0:
+        return xlsx_bytes
+
+    def mutator(sheet: str) -> str:
+        merge = _find_remarks_merge_ref(sheet)
+        if not merge:
+            return sheet
+        last = int(REMARKS_MERGE_RE.fullmatch(merge).group(2))
+        return _add_row_height(sheet, last, extra)
+
+    return _patch_sheet1_xml(xlsx_bytes, mutator)
 
 
 def _xml_decode_text(text: str) -> str:
@@ -839,6 +899,7 @@ def _prepare_xlsx_bytes(
     if shrink_pt > 0:
         xlsx_bytes = patch_logo_footer_font_sizes(xlsx_bytes, shrink_pt=shrink_pt)
     xlsx_bytes = patch_remarks_bottom_padding(xlsx_bytes)
+    xlsx_bytes = patch_remarks_box_height(xlsx_bytes)
     xlsx_bytes = patch_blank_customer_name(xlsx_bytes)
     xlsx_bytes = normalize_print_settings(xlsx_bytes)
     margin_left = _page_margin_left()

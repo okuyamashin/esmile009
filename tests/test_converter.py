@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -156,6 +158,31 @@ class RemarksPaddingTests(unittest.TestCase):
                 updated = read_remarks_cell_text(patched)
                 self.assertEqual(norm(updated), norm(f"{original.rstrip()}\n\n"))
 
+    def test_prepare_raises_remarks_box_height(self) -> None:
+        from app.converter import (
+            DEFAULT_REMARKS_LINE_HEIGHT_PT,
+            _find_remarks_merge_ref,
+            _prepare_xlsx_bytes,
+        )
+
+        import zipfile
+
+        original = SAMPLE_XLSX.read_bytes()
+        prepared = _prepare_xlsx_bytes(original, ".xlsx", None)
+        with zipfile.ZipFile(io.BytesIO(original)) as zin:
+            before = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        with zipfile.ZipFile(io.BytesIO(prepared)) as zin:
+            after = zin.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        merge = _find_remarks_merge_ref(after)
+        self.assertIsNotNone(merge)
+        last = int(merge.split(":")[1][1:])
+        row = re.search(rf'<row r="{last}"([^>]*)>', after)
+        self.assertIsNotNone(row)
+        ht = re.search(r'\bht="([^"]+)"', row.group(1))
+        self.assertIsNotNone(ht)
+        self.assertGreaterEqual(float(ht.group(1)), 10 * DEFAULT_REMARKS_LINE_HEIGHT_PT)
+        self.assertNotEqual(before, after)
+
     def test_prepare_includes_remarks_padding(self) -> None:
         from app.converter import _prepare_xlsx_bytes
 
@@ -165,7 +192,7 @@ class RemarksPaddingTests(unittest.TestCase):
         original = read_remarks_cell_text(SAMPLE_XLSX.read_bytes())
         prepared = _prepare_xlsx_bytes(SAMPLE_XLSX.read_bytes(), ".xlsx", None)
         updated = read_remarks_cell_text(prepared)
-        self.assertEqual(norm(updated), norm(f"{original.rstrip()}\n\n"))
+        self.assertEqual(norm(updated), norm(f"{original.rstrip()}" + ("\n" * 12)))
 
 
 def _xlsx_with_customer_name(xlsx_bytes: bytes, customer_name: str) -> bytes:

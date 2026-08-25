@@ -16,6 +16,7 @@ Thumbs.db
 samples/in/*.xlsx
 samples/in/*.pdf
 samples/in/*.xls
+samples/in/*.tsv
 samples/in/~$*
 samples/out/*.pdf
 
