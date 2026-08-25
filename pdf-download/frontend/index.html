@@ -77,6 +77,30 @@
       font-size: 0.9rem;
     }
 
+    .client-filters {
+      margin-top: 12px;
+    }
+
+    .client-filters-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      max-height: 96px;
+      overflow: auto;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+
+    .client-filters-list label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+      font-size: 0.82rem;
+    }
+
     button {
       min-height: 40px;
       padding: 0 16px;
@@ -104,7 +128,7 @@
 
     .table-wrap {
       overflow: auto;
-      max-height: calc(100vh - 210px);
+      max-height: calc(100vh - 280px);
       background: var(--card);
       border-top: 1px solid var(--line);
     }
@@ -151,6 +175,11 @@
     tbody tr.selected td { background: #eff6ff; }
     tbody tr.selected .col-check,
     tbody tr.selected .col-pdf { background: #dbeafe; }
+
+    th.col-num, td.col-num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -171,6 +200,10 @@
       </label>
       <button id="download" type="button" disabled>選択したPDFを連結してダウンロード</button>
     </div>
+    <div class="client-filters">
+      <label>クライアント名</label>
+      <div id="client-filters" class="client-filters-list"></div>
+    </div>
     <p id="meta" class="meta">読み込み中...</p>
     <p id="status" class="status"></p>
     <p id="error" class="error" hidden></p>
@@ -185,10 +218,11 @@
   </main>
   <script>
     const PRIMARY_HEADERS = [
-      "日", "時刻", "終了日時", "受付地域別受注番号", "クライアント名",
-      "問合せ種類", "受付種別", "建物情報", "現金", "売掛金",
-      "状態", "完了報告書送付状態"
+      "訪問日", "終了日時", "クライアント名", "担当", "受付種別",
+      "クライアント請求額", "現金", "売掛金",
+      "完了報告書送付状態", "状態"
     ];
+    const RIGHT_ALIGN_HEADERS = new Set(["クライアント請求額", "現金", "売掛金"]);
 
     const state = {
       dates: [],
@@ -198,7 +232,9 @@
       rows: [],
       extraPdfs: [],
       tsv: null,
-      selected: new Set()
+      selected: new Set(),
+      clients: [],
+      selectedClients: new Set()
     };
 
     const els = {
@@ -210,7 +246,8 @@
       status: document.getElementById("status"),
       error: document.getElementById("error"),
       thead: document.getElementById("thead"),
-      tbody: document.getElementById("tbody")
+      tbody: document.getElementById("tbody"),
+      clients: document.getElementById("client-filters")
     };
 
     function showError(message) {
@@ -242,7 +279,54 @@
       return PRIMARY_HEADERS.filter((name) => state.headers.includes(name));
     }
 
+    function clientNameOf(row) {
+      return ((row && row["クライアント名"]) || "").trim();
+    }
+
+    function collectClients(rows) {
+      const names = new Set();
+      (rows || []).forEach((row) => {
+        const name = clientNameOf(row);
+        if (name) names.add(name);
+      });
+      return [...names].sort((a, b) => a.localeCompare(b, "ja"));
+    }
+
+    function allClientValues() {
+      return new Set(state.clients);
+    }
+
+    function renderClientFilters() {
+      const parts = [
+        `<label><input type="checkbox" value="" ${state.selectedClients.has("") ? "checked" : ""}>（空白）</label>`
+      ];
+      state.clients.forEach((name) => {
+        parts.push(
+          `<label><input type="checkbox" value="${escapeAttr(name)}" ${state.selectedClients.has(name) ? "checked" : ""}>${escapeHtml(name)}</label>`
+        );
+      });
+      els.clients.innerHTML = parts.join("");
+    }
+
+    function matchesClient(row, extraPdf) {
+      if (state.selectedClients.size === 0) return true;
+      const name = extraPdf ? "" : clientNameOf(row);
+      return state.selectedClients.has(name);
+    }
+
+    function clearHiddenPdfSelection() {
+      state.rows.forEach((row) => {
+        if (matchesClient(row, "")) return;
+        (row._pdfs || []).forEach((name) => state.selected.delete(name));
+      });
+      state.extraPdfs.forEach((name) => {
+        if (matchesClient(null, name)) return;
+        state.selected.delete(name);
+      });
+    }
+
     function rowMatches(row, extraPdf, query) {
+      if (!matchesClient(row, extraPdf)) return false;
       if (!query) return true;
       const hay = extraPdf
         ? extraPdf.toLowerCase()
@@ -268,7 +352,7 @@
       const headCells = [
         `<th class="col-check"><input id="select-all" type="checkbox" title="全選択 / 全クリア" aria-label="全選択 / 全クリア"></th>`,
         `<th class="col-pdf">PDF</th>`,
-        ...headers.map((name) => `<th>${escapeHtml(name)}</th>`)
+        ...headers.map((name) => `<th${RIGHT_ALIGN_HEADERS.has(name) ? ' class="col-num"' : ""}>${escapeHtml(name)}</th>`)
       ];
       els.thead.innerHTML = `<tr>${headCells.join("")}</tr>`;
 
@@ -288,7 +372,8 @@
         parts.push(`<td class="col-check"><input type="checkbox" ${hasPdf ? "" : "disabled"} ${checked ? "checked" : ""} data-kind="row" data-index="${index}"></td>`);
         parts.push(`<td class="col-pdf">${escapeHtml(pdfLabel)}</td>`);
         headers.forEach((name) => {
-          parts.push(`<td title="${escapeAttr(row[name] || "")}">${escapeHtml(row[name] || "")}</td>`);
+          const cls = RIGHT_ALIGN_HEADERS.has(name) ? ' class="col-num"' : "";
+          parts.push(`<td${cls} title="${escapeAttr(row[name] || "")}">${escapeHtml(row[name] || "")}</td>`);
         });
         parts.push("</tr>");
       });
@@ -302,7 +387,8 @@
         parts.push(`<td class="col-check"><input type="checkbox" ${checked ? "checked" : ""} data-kind="extra" data-pdf="${escapeAttr(name)}"></td>`);
         parts.push(`<td class="col-pdf">${escapeHtml(name)}</td>`);
         headers.forEach((header, i) => {
-          parts.push(`<td>${i === 0 ? "（TSVにないPDF）" : ""}</td>`);
+          const cls = RIGHT_ALIGN_HEADERS.has(header) ? ' class="col-num"' : "";
+          parts.push(`<td${cls}>${i === 0 ? "（TSVにないPDF）" : ""}</td>`);
         });
         parts.push("</tr>");
       });
@@ -362,6 +448,9 @@
       state.extraPdfs = data.extra_pdfs || [];
       state.tsv = data.tsv;
       state.selected = new Set();
+      state.clients = collectClients(state.rows);
+      state.selectedClients = allClientValues();
+      renderClientFilters();
       const withPdf = state.rows.filter((row) => row._has_pdf).length;
       els.meta.textContent = [
         `日付 ${formatDate(date)}`,
@@ -420,6 +509,14 @@
     });
     els.filter.addEventListener("input", render);
     els.allCols.addEventListener("change", render);
+    els.clients.addEventListener("change", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      if (input.checked) state.selectedClients.add(input.value);
+      else state.selectedClients.delete(input.value);
+      clearHiddenPdfSelection();
+      render();
+    });
     els.thead.addEventListener("change", (event) => {
       const input = event.target;
       if (!(input instanceof HTMLInputElement) || input.id !== "select-all") return;
