@@ -5,11 +5,18 @@
 | 項目 | 値 |
 |------|-----|
 | 公開 URL | `https://esmile009.engawa5656.com` |
-| Route53 | `esmile009.engawa5656.com` → ALB（エイリアス） |
-| ALB | `esmile009-api-alb`（HTTPS 443） |
-| ACM | `esmile009.engawa5656.com`（ap-northeast-1） |
+| Route53 | `esmile009.engawa5656.com` → CloudFront（エイリアス） |
+| CloudFront | PDFダウンロード画面（`/`）と `/api/*`。変換APIは ALB へ転送 |
+| 基本認証 | `esmile` / `osaka` と `engawa` / `SUSUKINO`（`/health` `/convert` `/jobs` は対象外） |
+| データ | S3 `engawa-esmile009`（日付ディレクトリ + TSV + PDF） |
+| 静的画面 | S3 `engawa-esmile009-web` |
+| Lambda | `esmile009-pdf-download-api`（日付一覧 / TSV一覧 / PDF連結） |
+| ALB | `esmile009-api-alb`（HTTPS 443 / HTTP 80: CloudFront オリジン） |
+| ACM | `esmile009.engawa5656.com`（CloudFront は us-east-1、ALB は ap-northeast-1） |
 | ターゲット | EC2 `i-03eb3d0cea8a41d29`（`175.41.196.33`）ポート **18083** |
-| API | ルート直下 `/health` `/convert` `/jobs`（`BASE_PATH` 不要） |
+| API | `/health` `/convert` `/jobs`（`BASE_PATH` 不要） |
+
+デプロイ: `./pdf-download/deploy.sh`
 
 ## 動作確認
 

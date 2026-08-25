@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>esmile009 PDFダウンロード</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --card: #fff;
+      --line: #dbe3ef;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --danger: #b91c1c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Hiragino Sans", "Yu Gothic UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--card);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 20px 14px;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 1.25rem;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 16px;
+      align-items: end;
+    }
+
+    label {
+      display: grid;
+      gap: 4px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    select, input[type="search"] {
+      min-height: 40px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+
+    input[type="search"] { min-width: 220px; }
+
+    .check-inline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 40px;
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+
+    button {
+      min-height: 40px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .meta, .status, .error {
+      margin: 8px 0 0;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .error { color: var(--danger); }
+
+    main { padding: 0 0 40px; }
+
+    .table-wrap {
+      overflow: auto;
+      max-height: calc(100vh - 210px);
+      background: var(--card);
+      border-top: 1px solid var(--line);
+    }
+
+    table {
+      border-collapse: collapse;
+      min-width: 100%;
+      font-size: 0.78rem;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      border-right: 1px solid #eef2f7;
+      padding: 6px 8px;
+      white-space: nowrap;
+      vertical-align: top;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #eef4ff;
+      text-align: left;
+      font-weight: 600;
+    }
+
+    .col-check, .col-pdf {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      background: #fff;
+    }
+
+    th.col-check, th.col-pdf { z-index: 3; background: #eef4ff; }
+    .col-pdf { left: 36px; }
+    tr:nth-child(even) .col-check,
+    tr:nth-child(even) .col-pdf { background: #f8fafc; }
+
+    tbody tr.no-pdf { color: #9ca3af; }
+    tbody tr.selected td { background: #eff6ff; }
+    tbody tr.selected .col-check,
+    tbody tr.selected .col-pdf { background: #dbeafe; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>esmile009 PDFダウンロード</h1>
+    <div class="toolbar">
+      <label>
+        日付ディレクトリ
+        <select id="date-select"></select>
+      </label>
+      <label>
+        絞り込み
+        <input id="filter" type="search" placeholder="氏名・受注番号など">
+      </label>
+      <label class="check-inline">
+        <input id="all-cols" type="checkbox">
+        TSV全列を表示
+      </label>
+      <button id="download" type="button" disabled>選択したPDFを連結してダウンロード</button>
+    </div>
+    <p id="meta" class="meta">読み込み中...</p>
+    <p id="status" class="status"></p>
+    <p id="error" class="error" hidden></p>
+  </header>
+  <main>
+    <div class="table-wrap">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    const PRIMARY_HEADERS = [
+      "日", "時刻", "終了日時", "受付地域別受注番号", "クライアント名",
+      "問合せ種類", "受付種別", "建物情報", "現金", "売掛金",
+      "状態", "完了報告書送付状態"
+    ];
+
+    const state = {
+      dates: [],
+      latest: null,
+      date: "",
+      headers: [],
+      rows: [],
+      extraPdfs: [],
+      tsv: null,
+      selected: new Set()
+    };
+
+    const els = {
+      date: document.getElementById("date-select"),
+      filter: document.getElementById("filter"),
+      allCols: document.getElementById("all-cols"),
+      download: document.getElementById("download"),
+      meta: document.getElementById("meta"),
+      status: document.getElementById("status"),
+      error: document.getElementById("error"),
+      thead: document.getElementById("thead"),
+      tbody: document.getElementById("tbody")
+    };
+
+    function showError(message) {
+      els.error.hidden = !message;
+      els.error.textContent = message || "";
+    }
+
+    function apiUrl(path) {
+      return new URL(path, window.location.origin).toString();
+    }
+
+    async function api(path, options) {
+      const res = await fetch(apiUrl(path), {
+        credentials: "same-origin",
+        ...options
+      });
+      if (res.status === 401) {
+        throw new Error("基本認証に失敗しました。ユーザーとパスワードを確認してください。");
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `API error ${res.status}`);
+      }
+      return data;
+    }
+
+    function visibleHeaders() {
+      if (els.allCols.checked || !state.headers.length) return state.headers;
+      return PRIMARY_HEADERS.filter((name) => state.headers.includes(name));
+    }
+
+    function rowMatches(row, extraPdf, query) {
+      if (!query) return true;
+      const hay = extraPdf
+        ? extraPdf.toLowerCase()
+        : Object.values(row).join(" ").toLowerCase();
+      return hay.includes(query);
+    }
+
+    function selectedCount() {
+      return state.selected.size;
+    }
+
+    function updateDownloadState() {
+      const count = selectedCount();
+      els.download.disabled = count === 0;
+      els.download.textContent = count
+        ? `選択したPDFを連結してダウンロード（${count}件）`
+        : "選択したPDFを連結してダウンロード";
+    }
+
+    function render() {
+      const query = els.filter.value.trim().toLowerCase();
+      const headers = visibleHeaders();
+      const headCells = [
+        `<th class="col-check"><input id="select-all" type="checkbox" title="全選択 / 全クリア" aria-label="全選択 / 全クリア"></th>`,
+        `<th class="col-pdf">PDF</th>`,
+        ...headers.map((name) => `<th>${escapeHtml(name)}</th>`)
+      ];
+      els.thead.innerHTML = `<tr>${headCells.join("")}</tr>`;
+
+      const parts = [];
+      let visibleWithPdf = 0;
+      let visibleSelected = 0;
+
+      state.rows.forEach((row, index) => {
+        if (!rowMatches(row, "", query)) return;
+        const pdfs = row._pdfs || [];
+        const hasPdf = pdfs.length > 0;
+        if (hasPdf) visibleWithPdf += 1;
+        const checked = pdfs.some((name) => state.selected.has(name));
+        if (checked) visibleSelected += 1;
+        const pdfLabel = hasPdf ? pdfs.join(", ") : "なし";
+        parts.push(`<tr class="${hasPdf ? (checked ? "selected" : "") : "no-pdf"}" data-kind="row" data-index="${index}">`);
+        parts.push(`<td class="col-check"><input type="checkbox" ${hasPdf ? "" : "disabled"} ${checked ? "checked" : ""} data-kind="row" data-index="${index}"></td>`);
+        parts.push(`<td class="col-pdf">${escapeHtml(pdfLabel)}</td>`);
+        headers.forEach((name) => {
+          parts.push(`<td title="${escapeAttr(row[name] || "")}">${escapeHtml(row[name] || "")}</td>`);
+        });
+        parts.push("</tr>");
+      });
+
+      state.extraPdfs.forEach((name) => {
+        if (!rowMatches(null, name, query)) return;
+        visibleWithPdf += 1;
+        const checked = state.selected.has(name);
+        if (checked) visibleSelected += 1;
+        parts.push(`<tr class="${checked ? "selected" : ""}" data-kind="extra" data-pdf="${escapeAttr(name)}">`);
+        parts.push(`<td class="col-check"><input type="checkbox" ${checked ? "checked" : ""} data-kind="extra" data-pdf="${escapeAttr(name)}"></td>`);
+        parts.push(`<td class="col-pdf">${escapeHtml(name)}</td>`);
+        headers.forEach((header, i) => {
+          parts.push(`<td>${i === 0 ? "（TSVにないPDF）" : ""}</td>`);
+        });
+        parts.push("</tr>");
+      });
+
+      els.tbody.innerHTML = parts.join("") || `<tr><td colspan="${headers.length + 2}">該当する行がありません</td></tr>`;
+      const selectAll = document.getElementById("select-all");
+      if (selectAll) {
+        selectAll.disabled = visibleWithPdf === 0;
+        selectAll.checked = visibleWithPdf > 0 && visibleSelected === visibleWithPdf;
+        selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visibleWithPdf;
+      }
+      updateDownloadState();
+    }
+
+    function toggleRow(index, checked) {
+      const pdfs = (state.rows[index] && state.rows[index]._pdfs) || [];
+      pdfs.forEach((name) => checked ? state.selected.add(name) : state.selected.delete(name));
+    }
+
+    function visiblePdfs() {
+      const query = els.filter.value.trim().toLowerCase();
+      const names = [];
+      state.rows.forEach((row) => {
+        if (!rowMatches(row, "", query)) return;
+        (row._pdfs || []).forEach((name) => names.push(name));
+      });
+      state.extraPdfs.forEach((name) => {
+        if (rowMatches(null, name, query)) names.push(name);
+      });
+      return names;
+    }
+
+    async function loadDates() {
+      const data = await api("/api/dates");
+      state.dates = data.dates || [];
+      state.latest = data.latest || "";
+      els.date.innerHTML = state.dates.map((date) => {
+        const label = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+        return `<option value="${date}">${label}</option>`;
+      }).join("");
+      if (!state.dates.length) {
+        els.meta.textContent = "日付ディレクトリがありません";
+        return;
+      }
+      els.date.value = state.latest;
+      await loadItems(state.latest);
+    }
+
+    async function loadItems(date) {
+      showError("");
+      els.status.textContent = "";
+      els.meta.textContent = `${date} を読み込み中...`;
+      const data = await api(`/api/items?date=${encodeURIComponent(date)}`);
+      state.date = data.date;
+      state.headers = data.headers || [];
+      state.rows = data.rows || [];
+      state.extraPdfs = data.extra_pdfs || [];
+      state.tsv = data.tsv;
+      state.selected = new Set();
+      const withPdf = state.rows.filter((row) => row._has_pdf).length;
+      els.meta.textContent = [
+        `日付 ${formatDate(date)}`,
+        data.tsv ? `TSV ${data.tsv}` : "TSVなし",
+        `行 ${state.rows.length}`,
+        `PDFあり ${withPdf}`,
+        state.extraPdfs.length ? `TSV外PDF ${state.extraPdfs.length}` : null
+      ].filter(Boolean).join(" / ");
+      render();
+    }
+
+    async function downloadSelected() {
+      const pdfs = Array.from(state.selected);
+      if (!pdfs.length) return;
+      els.download.disabled = true;
+      els.status.textContent = "PDFを連結しています...";
+      showError("");
+      try {
+        const data = await api("/api/download", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ date: state.date, pdfs })
+        });
+        els.status.textContent = `${data.count}件を連結しました。ダウンロードを開始します。`;
+        const a = document.createElement("a");
+        a.href = apiUrl(data.url);
+        a.download = data.filename || `esmile009-${state.date}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (err) {
+        showError(err.message);
+        els.status.textContent = "";
+      } finally {
+        updateDownloadState();
+      }
+    }
+
+    function formatDate(value) {
+      return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replaceAll('"', "&quot;");
+    }
+
+    els.date.addEventListener("change", () => {
+      loadItems(els.date.value).catch((err) => showError(err.message));
+    });
+    els.filter.addEventListener("input", render);
+    els.allCols.addEventListener("change", render);
+    els.thead.addEventListener("change", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || input.id !== "select-all") return;
+      const names = visiblePdfs();
+      if (input.checked) names.forEach((name) => state.selected.add(name));
+      else names.forEach((name) => state.selected.delete(name));
+      render();
+    });
+    els.tbody.addEventListener("change", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      if (input.dataset.kind === "row") toggleRow(Number(input.dataset.index), input.checked);
+      if (input.dataset.kind === "extra") {
+        if (input.checked) state.selected.add(input.dataset.pdf);
+        else state.selected.delete(input.dataset.pdf);
+      }
+      render();
+    });
+    els.download.addEventListener("click", () => {
+      downloadSelected().catch((err) => showError(err.message));
+    });
+
+    loadDates().catch((err) => {
+      els.meta.textContent = "";
+      showError(err.message);
+    });
+  </script>
+</body>
+</html>

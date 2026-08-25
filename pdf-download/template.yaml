@@ -1,0 +1,297 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: esmile009 PDF download UI (CloudFront + S3 + Lambda)
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: esmile009.engawa5656.com
+  CertificateArn:
+    Type: String
+    Default: ""
+  DataBucket:
+    Type: String
+    Default: engawa-esmile009
+  AlbDomainName:
+    Type: String
+    Default: esmile009-api-alb-15102686.ap-northeast-1.elb.amazonaws.com
+  OriginSecret:
+    Type: String
+    NoEcho: true
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 1024
+    Architectures:
+      - x86_64
+
+Resources:
+  PdfApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: esmile009-pdf-download-api
+      Handler: handler.lambda_handler
+      CodeUri: lambda/
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+          ORIGIN_SECRET: !Ref OriginSecret
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource: !Sub arn:aws:s3:::${DataBucket}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Sub arn:aws:s3:::${DataBucket}/*
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: engawa-esmile009-web
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+
+  SiteOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: esmile009-pdf-site-oac
+        Description: OAC for esmile009 PDF UI
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DataOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: esmile009-pdf-data-oac
+        Description: OAC for merged PDFs
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontMergedRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${DataBucket}/merged/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${WebBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  BasicAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: esmile009-pdf-basic-auth
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Basic auth for PDF UI (skip convert API paths)
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri || "/";
+          if (
+            uri === "/health" ||
+            uri.indexOf("/convert") === 0 ||
+            uri.indexOf("/jobs") === 0 ||
+            uri.indexOf("/docs") === 0 ||
+            uri.indexOf("/openapi") === 0
+          ) {
+            return request;
+          }
+          var allowed = {
+            "Basic ZXNtaWxlOm9zYWth": true,
+            "Basic ZW5nYXdhOlNVU1VLSU5P": true
+          };
+          var auth = request.headers.authorization && request.headers.authorization.value;
+          if (auth && allowed[auth]) {
+            return request;
+          }
+          return {
+            statusCode: 401,
+            statusDescription: "Unauthorized",
+            headers: {
+              "www-authenticate": { value: 'Basic realm="esmile009"' },
+              "cache-control": { value: "no-store" }
+            },
+            body: "Authentication required"
+          };
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: esmile009 PDF download
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Aliases: !If
+          - HasCertificate
+          - [!Ref DomainName]
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - HasCertificate
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: site-s3
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: data-s3
+            DomainName: !Sub ${DataBucket}.s3.${AWS::Region}.amazonaws.com
+            OriginAccessControlId: !GetAtt DataOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: pdf-api
+            DomainName: !Select [2, !Split ["/", !GetAtt PdfApiFunctionUrl.FunctionUrl]]
+            OriginCustomHeaders:
+              - HeaderName: X-Origin-Secret
+                HeaderValue: !Ref OriginSecret
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+          - Id: convert-alb
+            DomainName: !Ref AlbDomainName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: site-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt BasicAuthFunction.FunctionARN
+        CacheBehaviors:
+          - PathPattern: /merged/*
+            TargetOriginId: data-s3
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt BasicAuthFunction.FunctionARN
+          - PathPattern: /api/*
+            TargetOriginId: pdf-api
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt BasicAuthFunction.FunctionARN
+          - PathPattern: /health
+            TargetOriginId: convert-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          - PathPattern: /convert*
+            TargetOriginId: convert-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          - PathPattern: /jobs*
+            TargetOriginId: convert-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          - PathPattern: /docs*
+            TargetOriginId: convert-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          - PathPattern: /openapi.json
+            TargetOriginId: convert-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+
+Outputs:
+  CloudFrontDomain:
+    Value: !GetAtt Distribution.DomainName
+  DistributionId:
+    Value: !Ref Distribution
+  WebBucketName:
+    Value: !Ref WebBucket
+  FunctionUrl:
+    Value: !GetAtt PdfApiFunctionUrl.FunctionUrl
