@@ -18,6 +18,9 @@ logger.setLevel(logging.INFO)
 BUCKET = os.environ.get("DATA_BUCKET", "engawa-esmile009")
 ORIGIN_SECRET = os.environ.get("ORIGIN_SECRET", "")
 ORDER_COL = "受付地域別受注番号"
+RECEIPT_COL = "受付番号"
+MAPPING_ORDER_COL = "注文ID"
+MAPPING_NAMES = {"orderid_mapping.tsv", "orderid-mapping.tsv"}
 DATE_RE = re.compile(r"^(\d{8})/$")
 DATE_VALUE_RE = re.compile(r"^\d{8}$")
 PDF_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.pdf$")
@@ -94,7 +97,11 @@ def _items_payload(date):
         if key.lower().endswith(".pdf") and key.count("/") == prefix.count("/")
     )
     tsv_keys = _tsv_keys_for_date(
-        sorted(key for key in keys if key.lower().endswith(".tsv")),
+        sorted(
+            key
+            for key in keys
+            if key.lower().endswith(".tsv") and not _is_mapping_tsv(key)
+        ),
         date,
     )
     if not tsv_keys:
@@ -133,6 +140,9 @@ def _items_payload(date):
         claimed.update(matched)
 
     extra_pdfs = [name for name in pdfs if name not in claimed]
+    mapping_key = _mapping_key(keys, prefix)
+    if mapping_key:
+        headers = _apply_order_mapping(headers, rows, _read_order_mapping(mapping_key))
     return {
         "date": date,
         "headers": headers,
@@ -242,11 +252,12 @@ def start_file(payload):
 
 
 def build_download_filename(row):
-    order = _safe_part(row.get(ORDER_COL))
+    receipt = _safe_part(row.get(RECEIPT_COL))
     work_date = _work_date(row.get("終了日時"))
     place = _place(row)
     name = _safe_part(row.get("氏名"))
-    return f"{order}_{work_date}_報告書　{place}_{name}様.pdf"
+    prefix = f"{receipt}_" if receipt else ""
+    return f"{prefix}{work_date}_報告書　{place}_{name}様.pdf"
 
 
 def _safe_part(value):
@@ -288,6 +299,42 @@ def _pdfs_for_order(order_no, pdf_set):
         matched.append(exact)
     matched.extend(extras)
     return matched
+
+
+def _is_mapping_tsv(key):
+    return key.rsplit("/", 1)[-1].lower() in MAPPING_NAMES
+
+
+def _mapping_key(keys, prefix):
+    for key in keys:
+        name = key[len(prefix) :] if key.startswith(prefix) else key.rsplit("/", 1)[-1]
+        if name.lower() in MAPPING_NAMES and key.count("/") == prefix.count("/"):
+            return key
+    return None
+
+
+def _read_order_mapping(key):
+    _headers, rows = _read_tsv(key)
+    mapping = {}
+    for row in rows:
+        order_id = (row.get(MAPPING_ORDER_COL) or "").strip()
+        if not order_id:
+            continue
+        mapping[order_id] = (row.get(RECEIPT_COL) or "").strip()
+    return mapping
+
+
+def _apply_order_mapping(headers, rows, mapping):
+    for row in rows:
+        order_no = (row.get(ORDER_COL) or "").strip()
+        row[RECEIPT_COL] = mapping.get(order_no, "")
+    if RECEIPT_COL not in headers:
+        if "訪問日" in headers:
+            idx = headers.index("訪問日") + 1
+            headers = headers[:idx] + [RECEIPT_COL] + headers[idx:]
+        else:
+            headers = [RECEIPT_COL] + list(headers)
+    return headers
 
 
 def _tsv_end_date(key):
