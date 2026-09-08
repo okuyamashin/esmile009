@@ -180,6 +180,26 @@
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
+
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    th.sortable:hover { background: #dbe7ff; }
+
+    th.sortable .sort-mark {
+      margin-left: 4px;
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .col-pdf a.pdf-link {
+      color: #1d4ed8;
+      text-decoration: none;
+    }
+
+    .col-pdf a.pdf-link:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -217,6 +237,13 @@
     </div>
   </main>
   <script>
+    window.addEventListener("error", (event) => {
+      const el = document.getElementById("error");
+      if (!el) return;
+      el.hidden = false;
+      el.textContent = `JavaScriptエラー: ${event.message}`;
+    });
+
     const PRIMARY_HEADERS = [
       "訪問日", "終了日時", "クライアント名", "担当", "受付種別",
       "クライアント請求額", "現金", "売掛金",
@@ -234,7 +261,9 @@
       tsv: null,
       selected: new Set(),
       clients: [],
-      selectedClients: new Set()
+      selectedClients: new Set(),
+      sortKey: "",
+      sortDir: "asc"
     };
 
     const els = {
@@ -286,6 +315,7 @@
     function collectClients(rows) {
       const names = new Set();
       (rows || []).forEach((row) => {
+        if (!row._has_pdf) return;
         const name = clientNameOf(row);
         if (name) names.add(name);
       });
@@ -325,13 +355,64 @@
       });
     }
 
-    function rowMatches(row, extraPdf, query) {
-      if (!matchesClient(row, extraPdf)) return false;
+    function rowMatches(row, query) {
+      if (!row._has_pdf) return false;
+      if (!matchesClient(row, "")) return false;
       if (!query) return true;
-      const hay = extraPdf
-        ? extraPdf.toLowerCase()
-        : Object.values(row).join(" ").toLowerCase();
+      const hay = Object.values(row).join(" ").toLowerCase();
       return hay.includes(query);
+    }
+
+    function parseSortNumber(value) {
+      const text = String(value ?? "").replace(/,/g, "").trim();
+      if (!text) return null;
+      const num = Number(text);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function sortValue(row, key) {
+      if (key === "_pdf") return (row._pdfs || []).join(",");
+      return row[key] || "";
+    }
+
+    function compareRows(a, b) {
+      const key = state.sortKey;
+      if (!key) return 0;
+      const dir = state.sortDir === "desc" ? -1 : 1;
+      const va = sortValue(a, key);
+      const vb = sortValue(b, key);
+      if (RIGHT_ALIGN_HEADERS.has(key)) {
+        const na = parseSortNumber(va);
+        const nb = parseSortNumber(vb);
+        if (na === null && nb === null) return 0;
+        if (na === null) return 1;
+        if (nb === null) return -1;
+        if (na !== nb) return (na - nb) * dir;
+      }
+      return String(va).localeCompare(String(vb), "ja", { numeric: true }) * dir;
+    }
+
+    function displayRows() {
+      const query = els.filter.value.trim().toLowerCase();
+      const rows = state.rows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => rowMatches(row, query));
+      if (state.sortKey) {
+        rows.sort((left, right) => compareRows(left.row, right.row) || (left.index - right.index));
+      }
+      return rows;
+    }
+
+    function sortMark(key) {
+      if (state.sortKey !== key) return "";
+      return state.sortDir === "desc" ? "▼" : "▲";
+    }
+
+    function headerCell(label, key, extraClass) {
+      const classes = ["sortable"];
+      if (extraClass) classes.push(extraClass);
+      if (RIGHT_ALIGN_HEADERS.has(key)) classes.push("col-num");
+      return `<th class="${classes.join(" ")}" data-sort="${escapeAttr(key)}">${escapeHtml(label)}<span class="sort-mark">${sortMark(key)}</span></th>`;
     }
 
     function selectedCount() {
@@ -347,30 +428,25 @@
     }
 
     function render() {
-      const query = els.filter.value.trim().toLowerCase();
       const headers = visibleHeaders();
+      const rows = displayRows();
       const headCells = [
         `<th class="col-check"><input id="select-all" type="checkbox" title="全選択 / 全クリア" aria-label="全選択 / 全クリア"></th>`,
-        `<th class="col-pdf">PDF</th>`,
-        ...headers.map((name) => `<th${RIGHT_ALIGN_HEADERS.has(name) ? ' class="col-num"' : ""}>${escapeHtml(name)}</th>`)
+        headerCell("PDF", "_pdf", "col-pdf"),
+        ...headers.map((name) => headerCell(name, name))
       ];
       els.thead.innerHTML = `<tr>${headCells.join("")}</tr>`;
 
       const parts = [];
-      let visibleWithPdf = 0;
       let visibleSelected = 0;
 
-      state.rows.forEach((row, index) => {
-        if (!rowMatches(row, "", query)) return;
+      rows.forEach(({ row, index }) => {
         const pdfs = row._pdfs || [];
-        const hasPdf = pdfs.length > 0;
-        if (hasPdf) visibleWithPdf += 1;
         const checked = pdfs.some((name) => state.selected.has(name));
         if (checked) visibleSelected += 1;
-        const pdfLabel = hasPdf ? pdfs.join(", ") : "なし";
-        parts.push(`<tr class="${hasPdf ? (checked ? "selected" : "") : "no-pdf"}" data-kind="row" data-index="${index}">`);
-        parts.push(`<td class="col-check"><input type="checkbox" ${hasPdf ? "" : "disabled"} ${checked ? "checked" : ""} data-kind="row" data-index="${index}"></td>`);
-        parts.push(`<td class="col-pdf">${escapeHtml(pdfLabel)}</td>`);
+        parts.push(`<tr class="${checked ? "selected" : ""}" data-kind="row" data-index="${index}">`);
+        parts.push(`<td class="col-check"><input type="checkbox" ${checked ? "checked" : ""} data-kind="row" data-index="${index}"></td>`);
+        parts.push(`<td class="col-pdf">${pdfLinks(pdfs)}</td>`);
         headers.forEach((name) => {
           const cls = RIGHT_ALIGN_HEADERS.has(name) ? ' class="col-num"' : "";
           parts.push(`<td${cls} title="${escapeAttr(row[name] || "")}">${escapeHtml(row[name] || "")}</td>`);
@@ -378,27 +454,12 @@
         parts.push("</tr>");
       });
 
-      state.extraPdfs.forEach((name) => {
-        if (!rowMatches(null, name, query)) return;
-        visibleWithPdf += 1;
-        const checked = state.selected.has(name);
-        if (checked) visibleSelected += 1;
-        parts.push(`<tr class="${checked ? "selected" : ""}" data-kind="extra" data-pdf="${escapeAttr(name)}">`);
-        parts.push(`<td class="col-check"><input type="checkbox" ${checked ? "checked" : ""} data-kind="extra" data-pdf="${escapeAttr(name)}"></td>`);
-        parts.push(`<td class="col-pdf">${escapeHtml(name)}</td>`);
-        headers.forEach((header, i) => {
-          const cls = RIGHT_ALIGN_HEADERS.has(header) ? ' class="col-num"' : "";
-          parts.push(`<td${cls}>${i === 0 ? "（TSVにないPDF）" : ""}</td>`);
-        });
-        parts.push("</tr>");
-      });
-
       els.tbody.innerHTML = parts.join("") || `<tr><td colspan="${headers.length + 2}">該当する行がありません</td></tr>`;
       const selectAll = document.getElementById("select-all");
       if (selectAll) {
-        selectAll.disabled = visibleWithPdf === 0;
-        selectAll.checked = visibleWithPdf > 0 && visibleSelected === visibleWithPdf;
-        selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visibleWithPdf;
+        selectAll.disabled = rows.length === 0;
+        selectAll.checked = rows.length > 0 && visibleSelected === rows.length;
+        selectAll.indeterminate = visibleSelected > 0 && visibleSelected < rows.length;
       }
       updateDownloadState();
     }
@@ -409,14 +470,9 @@
     }
 
     function visiblePdfs() {
-      const query = els.filter.value.trim().toLowerCase();
       const names = [];
-      state.rows.forEach((row) => {
-        if (!rowMatches(row, "", query)) return;
+      displayRows().forEach(({ row }) => {
         (row._pdfs || []).forEach((name) => names.push(name));
-      });
-      state.extraPdfs.forEach((name) => {
-        if (rowMatches(null, name, query)) names.push(name);
       });
       return names;
     }
@@ -448,18 +504,45 @@
       state.extraPdfs = data.extra_pdfs || [];
       state.tsv = data.tsv;
       state.selected = new Set();
+      state.sortKey = "";
+      state.sortDir = "asc";
       state.clients = collectClients(state.rows);
       state.selectedClients = allClientValues();
       renderClientFilters();
       const withPdf = state.rows.filter((row) => row._has_pdf).length;
+      const noPdf = state.rows.length - withPdf;
       els.meta.textContent = [
         `日付 ${formatDate(date)}`,
+        formatUpload(data.latest_upload),
         data.tsv ? `TSV ${data.tsv}` : "TSVなし",
-        `行 ${state.rows.length}`,
-        `PDFあり ${withPdf}`,
-        state.extraPdfs.length ? `TSV外PDF ${state.extraPdfs.length}` : null
+        `表示 ${withPdf}`,
+        noPdf ? `PDFなし除外 ${noPdf}` : null,
+        state.extraPdfs.length ? `TSV外PDF除外 ${state.extraPdfs.length}` : null
       ].filter(Boolean).join(" / ");
       render();
+    }
+
+    function pdfLinks(pdfs) {
+      return pdfs.map((name) => (
+        `<a href="#" class="pdf-link" data-pdf="${escapeAttr(name)}">${escapeHtml(name)}</a>`
+      )).join("<br>");
+    }
+
+    async function downloadOne(name) {
+      els.status.textContent = `${name} を準備しています...`;
+      showError("");
+      const data = await api("/api/file", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: state.date, pdf: name })
+      });
+      els.status.textContent = "ダウンロードを開始します。";
+      const a = document.createElement("a");
+      a.href = apiUrl(data.url);
+      a.download = data.filename || name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     }
 
     async function downloadSelected() {
@@ -493,6 +576,23 @@
       return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
     }
 
+    function formatUpload(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      const parts = new Intl.DateTimeFormat("ja-JP", {
+        timeZone: "Asia/Tokyo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }).formatToParts(date);
+      const get = (type) => (parts.find((part) => part.type === type) || {}).value;
+      return `最終アップロード ${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -517,6 +617,19 @@
       clearHiddenPdfSelection();
       render();
     });
+    els.thead.addEventListener("click", (event) => {
+      if (event.target.closest("input")) return;
+      const th = event.target.closest("th[data-sort]");
+      if (!th) return;
+      const key = th.dataset.sort;
+      if (state.sortKey === key) {
+        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.sortKey = key;
+        state.sortDir = "asc";
+      }
+      render();
+    });
     els.thead.addEventListener("change", (event) => {
       const input = event.target;
       if (!(input instanceof HTMLInputElement) || input.id !== "select-all") return;
@@ -525,14 +638,19 @@
       else names.forEach((name) => state.selected.delete(name));
       render();
     });
+    els.tbody.addEventListener("click", (event) => {
+      const link = event.target.closest("a.pdf-link");
+      if (!link) return;
+      event.preventDefault();
+      downloadOne(link.dataset.pdf).catch((err) => {
+        showError(err.message);
+        els.status.textContent = "";
+      });
+    });
     els.tbody.addEventListener("change", (event) => {
       const input = event.target;
       if (!(input instanceof HTMLInputElement)) return;
       if (input.dataset.kind === "row") toggleRow(Number(input.dataset.index), input.checked);
-      if (input.dataset.kind === "extra") {
-        if (input.checked) state.selected.add(input.dataset.pdf);
-        else state.selected.delete(input.dataset.pdf);
-      }
       render();
     });
     els.download.addEventListener("click", () => {

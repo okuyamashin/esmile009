@@ -4,7 +4,8 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
+from zoneinfo import ZoneInfo
 
 import boto3
 from botocore.config import Config
@@ -20,6 +21,10 @@ ORDER_COL = "受付地域別受注番号"
 DATE_RE = re.compile(r"^(\d{8})/$")
 DATE_VALUE_RE = re.compile(r"^\d{8}$")
 PDF_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.pdf$")
+UNSAFE_NAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+DATE_IN_TEXT_RE = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})")
+TSV_RANGE_RE = re.compile(r"(\d{8})-(\d{8})\.tsv$", re.I)
+JST = ZoneInfo("Asia/Tokyo")
 
 s3 = boto3.client(
     "s3",
@@ -52,6 +57,8 @@ def lambda_handler(event, context):
             return list_items(qs.get("date", ""))
         if method == "POST" and path.endswith("/download"):
             return start_download(_read_json_body(event))
+        if method == "POST" and path.endswith("/file"):
+            return start_file(_read_json_body(event))
         return _json(404, {"error": "not found"})
     except ValueError as exc:
         return _json(400, {"error": str(exc)})
@@ -73,30 +80,49 @@ def list_dates():
 
 
 def list_items(date):
-    date = _require_date(date)
+    return _json(200, _items_payload(_require_date(date)))
+
+
+def _items_payload(date):
     prefix = f"{date}/"
-    keys = _list_keys(prefix)
+    objects = _list_objects(prefix)
+    keys = [obj["Key"] for obj in objects]
+    latest_upload = _latest_upload_iso(objects)
     pdfs = sorted(
         key[len(prefix) :]
         for key in keys
         if key.lower().endswith(".pdf") and key.count("/") == prefix.count("/")
     )
-    tsv_keys = [key for key in keys if key.lower().endswith(".tsv")]
+    tsv_keys = _tsv_keys_for_date(
+        sorted(key for key in keys if key.lower().endswith(".tsv")),
+        date,
+    )
     if not tsv_keys:
-        return _json(
-            200,
-            {
-                "date": date,
-                "headers": [],
-                "rows": [],
-                "pdfs": pdfs,
-                "extra_pdfs": pdfs,
-                "tsv": None,
-            },
-        )
+        return {
+            "date": date,
+            "headers": [],
+            "rows": [],
+            "pdfs": pdfs,
+            "extra_pdfs": pdfs,
+            "tsv": None,
+            "tsv_count": 0,
+            "latest_upload": latest_upload,
+        }
 
-    tsv_key = sorted(tsv_keys)[-1]
-    headers, rows = _read_tsv(tsv_key)
+    headers = []
+    rows = []
+    seen = set()
+    for tsv_key in tsv_keys:
+        file_headers, file_rows = _read_tsv(tsv_key)
+        if file_headers:
+            headers = file_headers
+        for row in file_rows:
+            order_no = (row.get(ORDER_COL) or "").strip()
+            if not order_no or order_no in seen:
+                continue
+            seen.add(order_no)
+            rows.append(row)
+
     pdf_set = set(pdfs)
     claimed = set()
     for row in rows:
@@ -107,17 +133,16 @@ def list_items(date):
         claimed.update(matched)
 
     extra_pdfs = [name for name in pdfs if name not in claimed]
-    return _json(
-        200,
-        {
-            "date": date,
-            "headers": headers,
-            "rows": rows,
-            "pdfs": pdfs,
-            "extra_pdfs": extra_pdfs,
-            "tsv": tsv_key.rsplit("/", 1)[-1],
-        },
-    )
+    return {
+        "date": date,
+        "headers": headers,
+        "rows": rows,
+        "pdfs": pdfs,
+        "extra_pdfs": extra_pdfs,
+        "tsv": tsv_keys[-1].rsplit("/", 1)[-1],
+        "tsv_count": len(tsv_keys),
+        "latest_upload": latest_upload,
+    }
 
 
 def start_download(payload):
@@ -177,6 +202,80 @@ def start_download(payload):
     )
 
 
+def start_file(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("invalid json")
+    date = _require_date(str(payload.get("date") or ""))
+    name = str(payload.get("pdf") or "").strip()
+    if not PDF_NAME_RE.fullmatch(name):
+        raise ValueError("invalid pdf name")
+
+    data = _items_payload(date)
+    if name not in set(data.get("pdfs") or []):
+        raise ValueError(f"pdf not found: {name}")
+    row = next(
+        (candidate for candidate in (data.get("rows") or []) if name in (candidate.get("_pdfs") or [])),
+        None,
+    )
+    if row is None:
+        raise ValueError("pdf is not linked to a tsv row")
+
+    filename = build_download_filename(row)
+    src = f"{date}/{name}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    dest = f"merged/{date}/{stamp}_{name}"
+    try:
+        s3.copy_object(
+            Bucket=BUCKET,
+            CopySource={"Bucket": BUCKET, "Key": src},
+            Key=dest,
+            ContentType="application/pdf",
+            ContentDisposition=_content_disposition(filename),
+            MetadataDirective="REPLACE",
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            raise ValueError(f"pdf not found: {name}") from exc
+        raise
+    return _json(200, {"url": f"/{dest}", "filename": filename})
+
+
+def build_download_filename(row):
+    order = _safe_part(row.get(ORDER_COL))
+    work_date = _work_date(row.get("終了日時"))
+    place = _place(row)
+    name = _safe_part(row.get("氏名"))
+    return f"{order}_{work_date}_報告書　{place}_{name}様.pdf"
+
+
+def _safe_part(value):
+    return UNSAFE_NAME_RE.sub("", (value or "").strip())
+
+
+def _work_date(value):
+    text = (value or "").strip()
+    match = DATE_IN_TEXT_RE.search(text)
+    if match:
+        return f"{match.group(1)}{int(match.group(2)):02d}{int(match.group(3)):02d}"
+    digits = re.sub(r"\D", "", text)
+    return digits[:8] if len(digits) >= 8 else digits
+
+
+def _place(row):
+    building = _safe_part(row.get("建物名"))
+    if building:
+        return building
+    city = _safe_part(row.get("住所（市区町村）"))
+    rest = _safe_part(row.get("住所（その他）"))
+    return f"{city}{rest}"
+
+
+def _content_disposition(filename):
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"report.pdf\"; filename*=UTF-8''{encoded}"
+
+
 def _pdfs_for_order(order_no, pdf_set):
     exact = f"{order_no}.pdf"
     extras = sorted(
@@ -191,13 +290,40 @@ def _pdfs_for_order(order_no, pdf_set):
     return matched
 
 
-def _list_keys(prefix):
-    keys = []
+def _tsv_end_date(key):
+    match = TSV_RANGE_RE.search(key.rsplit("/", 1)[-1])
+    return match.group(2) if match else None
+
+
+def _tsv_keys_for_date(tsv_keys, date):
+    matched = [key for key in tsv_keys if _tsv_end_date(key) == date]
+    if matched:
+        return matched
+    return tsv_keys[-1:] if tsv_keys else []
+
+
+def _list_objects(prefix):
+    objects = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
         for obj in page.get("Contents") or []:
-            keys.append(obj["Key"])
-    return keys
+            objects.append(obj)
+    return objects
+
+
+def _latest_upload_iso(objects):
+    latest = None
+    for obj in objects:
+        modified = obj.get("LastModified")
+        if modified is None:
+            continue
+        if latest is None or modified > latest:
+            latest = modified
+    if latest is None:
+        return None
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    return latest.astimezone(JST).isoformat()
 
 
 def _read_tsv(key):
